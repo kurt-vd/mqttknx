@@ -1,0 +1,12 @@
+# output
+/mqttnxd
+/eibgtrace
+/eibtimeoff
+/mqttoff
+
+# temp
+*.o
+
+# environment
+/tags
+/config.mk
