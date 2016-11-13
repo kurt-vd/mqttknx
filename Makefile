@@ -15,7 +15,7 @@ VERSION := $(shell git describe --tags --always)
 
 CPPFLAGS += -DVERSION=\"$(VERSION)\"
 
-eibtimeoff eibgtrace: LDLIBS:=-leibclient $(LDLIBS)
+eibtimeoff eibgtrace: LDLIBS:=-leibclient $(LDLIBS) -lrt
 mqttnxd: LDLIBS:=-lmosquitto -leibclient $(LDLIBS)
 mqttoff: LDLIBS:=-lmosquitto $(LDLIBS)
 

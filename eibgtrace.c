@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <unistd.h>
 #include <getopt.h>
@@ -80,6 +81,19 @@ const char *eibgroupstr(int val)
 	return buf;
 }
 
+const char *nowstr(void)
+{
+	struct timespec ts;
+	int ret;
+	static char buf[64];
+
+	ret = clock_gettime(CLOCK_MONOTONIC, &ts);
+	if (ret < 0)
+		mylog(LOG_ERR, "clock_gettime failed: %s", ESTR(errno));
+	sprintf(buf, "%lu.%06lu", ts.tv_sec, ts.tv_nsec / 1000);
+	return buf;
+}
+
 int main(int argc, char *argv[])
 {
 	int opt, ret, j;
@@ -148,7 +162,7 @@ int main(int argc, char *argv[])
 			for (j = 0; j < ret; ++j)
 				value = (value << 8) + buf[2+j];
 		}
-		printf("%s\t%s\t%u\n", eibphysstr(src), eibgroupstr(dst), value);
+		printf("%s\t%s\t%s\t%u\n", nowstr(), eibphysstr(src), eibgroupstr(dst), value);
 		fflush(stdout);
 	}
 
