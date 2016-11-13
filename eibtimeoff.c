@@ -166,7 +166,7 @@ int main(int argc, char *argv[])
 
 	signal(SIGALRM, sigalrmhandler);
 	atexit(my_exit);
-	openlog(NAME, LOG_CONS | LOG_PERROR, LOG_DAEMON);
+	openlog(NAME, LOG_CONS | LOG_PERROR, LOG_LOCAL2);
 
 	if (optind >= argc) {
 		fputs(help_msg, stderr);

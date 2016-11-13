@@ -247,7 +247,7 @@ int main(int argc, char *argv[])
 	}
 
 	atexit(my_exit);
-	openlog(NAME, LOG_CONS | LOG_PERROR, LOG_DAEMON);
+	openlog(NAME, LOG_CONS | LOG_PERROR, LOG_LOCAL2);
 
 	/* MQTT start */
 	mosquitto_lib_init();

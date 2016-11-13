@@ -333,7 +333,7 @@ int main(int argc, char *argv[])
 	signal(SIGINT, sighandler);
 	//atexit(my_exit);
 
-	openlog(NAME, LOG_CONS | LOG_PERROR, LOG_DAEMON);
+	openlog(NAME, LOG_CONS | LOG_PERROR, LOG_LOCAL2);
 	/* MQTT start */
 	mosquitto_lib_init();
 	mosq = mosquitto_new(csprintf("eibd:%s #%i", eib_uri, getpid()), true, 0);
