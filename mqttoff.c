@@ -10,6 +10,7 @@
 
 #include <unistd.h>
 #include <getopt.h>
+#include <syslog.h>
 #include <mosquitto.h>
 
 #define NAME "mqttoff"
@@ -18,15 +19,9 @@
 #endif
 
 /* generic error logging */
-#define LOG_ERR		3
-#define LOG_WARNING	4
-#define LOG_NOTICE	5
-#define LOG_INFO	6
-#define LOG_DEBUG	8
 #define mylog(loglevel, fmt, ...) \
 	({\
-		fprintf(stderr, "%s: " fmt "\n", NAME, ##__VA_ARGS__);\
-		fflush(stderr);\
+		syslog(loglevel, fmt, ##__VA_ARGS__); \
 		if (loglevel <= LOG_ERR)\
 			exit(1);\
 	})
@@ -252,6 +247,7 @@ int main(int argc, char *argv[])
 	}
 
 	atexit(my_exit);
+	openlog(NAME, LOG_CONS | LOG_PERROR, LOG_DAEMON);
 
 	/* MQTT start */
 	mosquitto_lib_init();

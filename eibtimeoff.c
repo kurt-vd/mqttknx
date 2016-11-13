@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <poll.h>
+#include <syslog.h>
 #include <eibclient.h>
 
 #define NAME "eibtimeoff"
@@ -17,12 +18,9 @@
 #endif
 
 /* generic error logging */
-#define LOG_ERR	1
-#define LOG_INFO 3
 #define mylog(loglevel, fmt, ...) \
 	({\
-		fprintf(stderr, "%s: " fmt "\n", NAME, ##__VA_ARGS__);\
-		fflush(stderr);\
+		syslog(loglevel, fmt, ##__VA_ARGS__); \
 		if (loglevel <= LOG_ERR)\
 			exit(1);\
 	})
@@ -168,6 +166,7 @@ int main(int argc, char *argv[])
 
 	signal(SIGALRM, sigalrmhandler);
 	atexit(my_exit);
+	openlog(NAME, LOG_CONS | LOG_PERROR, LOG_DAEMON);
 
 	if (optind >= argc) {
 		fputs(help_msg, stderr);
