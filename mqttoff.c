@@ -83,29 +83,24 @@ struct item {
 struct item *items;
 
 /* MQTT iface */
-static void my_mqtt_connect(struct mosquitto *mosq, void *obj, int result)
-{
-	mylog(LOG_INFO, "MQTT connected, result %i", result);
-}
-
 static void my_mqtt_log(struct mosquitto *mosq, void *userdata, int level, const char *str)
 {
-	int logpri;
+	static const int logpri_map[] = {
+		MOSQ_LOG_ERR, LOG_ERR,
+		MOSQ_LOG_WARNING, LOG_WARNING,
+		MOSQ_LOG_NOTICE, LOG_NOTICE,
+		MOSQ_LOG_INFO, LOG_INFO,
+		MOSQ_LOG_DEBUG, LOG_DEBUG,
+		0,
+	};
+	int j;
 
-	if (level & MOSQ_LOG_ERR)
-		logpri = LOG_ERR;
-	else if (level & MOSQ_LOG_WARNING)
-		logpri = LOG_WARNING;
-	else if (level & MOSQ_LOG_NOTICE)
-		logpri = LOG_NOTICE;
-	else if (level & MOSQ_LOG_INFO)
-		logpri = LOG_INFO;
-	else if (level & MOSQ_LOG_DEBUG)
-		return;//logpri = LOG_DEBUG;
-	else
-		return;
-
-	mylog(logpri, "[mosquitto] %s", str);
+	for (j = 0; logpri_map[j]; j += 2) {
+		if (level & logpri_map[j]) {
+			mylog(logpri_map[j+1], "[mosquitto] %s", str);
+			return;
+		}
+	}
 }
 
 static struct item *get_item(const char *topic)
@@ -258,7 +253,6 @@ int main(int argc, char *argv[])
 	/* mosquitto_will_set(mosq, "TOPIC", 0, NULL, mqtt_qos, 1); */
 
 	mosquitto_log_callback_set(mosq, my_mqtt_log);
-	mosquitto_connect_callback_set(mosq, my_mqtt_connect);
 	mosquitto_message_callback_set(mosq, my_mqtt_msg);
 
 	ret = mosquitto_connect(mosq, mqtt_host, mqtt_port, mqtt_keepalive);
