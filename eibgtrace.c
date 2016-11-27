@@ -55,7 +55,7 @@ struct item {
 
 /* EIB parameters */
 static const char *eib_uri = "ip:localhost";
-static int syslog;
+static int logtosyslog;
 
 /* State */
 static EIBConnection *eib;
@@ -165,7 +165,7 @@ int main(int argc, char *argv[])
 			for (j = 0; j < ret; ++j)
 				value = (value << 8) + buf[2+j];
 		}
-		if (syslog)
+		if (logtosyslog)
 			syslog(LOG_INFO, "%s %s %u\n", eibphysstr(src), eibgroupstr(dst), value);
 		else {
 			printf("%s %s %s %u\n", nowstr(), eibphysstr(src), eibgroupstr(dst), value);
