@@ -24,4 +24,4 @@ install: $(PROGS)
 	$(foreach PROG, $(PROGS), install -vp -m 0777 $(INSTOPTS) $(PROG) $(DESTDIR)$(PREFIX)/bin/$(PROG);)
 
 clean:
-	rm -rf $(wildcard *.o) $(PROGS)
+	rm -rf $(wildcard *.o lib/*.o) $(PROGS)
