@@ -7,11 +7,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 #include <unistd.h>
 #include <getopt.h>
 #include <syslog.h>
 #include <mosquitto.h>
+
+#include "lib/libt.h"
 
 #define NAME "mqttoff"
 #ifndef VERSION
@@ -76,8 +79,8 @@ struct item {
 
 	char *topic;
 	char *resetvalue;
-	int delay;
-	time_t ontime;
+	double delay;
+	double ontime;
 };
 
 struct item *items;
@@ -121,9 +124,10 @@ static struct item *get_item(const char *topic)
 	return it;
 }
 
-static void reset_item(struct item *it)
+static void reset_item(void *dat)
 {
 	int ret;
+	struct item *it = dat;
 
 	ret = mosquitto_publish(mosq, NULL, it->topic, strlen(it->resetvalue ?: "0"), it->resetvalue ?: "0", mqtt_qos, 1);
 	if (ret < 0)
@@ -153,7 +157,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		if (msg->payloadlen) {
 			tok = strtok(msg->payload, " \t");
 			if (tok) {
-				it->delay = strtoul(tok, &tok, 0);
+				it->delay = strtod(tok, &tok);
 				switch (tolower(*tok)) {
 				case 'w':
 					it->delay *= 7;
@@ -165,7 +169,8 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 					it->delay *= 60;
 					break;
 				}
-			}
+			} else
+				it->delay = NAN;
 			tok = strtok(NULL, " \t");
 			if (tok)
 				it->resetvalue = strdup(tok);
@@ -174,11 +179,11 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 				it->resetvalue = NULL;
 			}
 		}
-		mylog(LOG_INFO, "timeoff spec for %s: %us '%s'", it->topic, it->delay, it->resetvalue ?: "");
+		mylog(LOG_INFO, "timeoff spec for %s: %.2lfs '%s'", it->topic, it->delay, it->resetvalue ?: "");
 
-		if (it->delay && it->ontime &&
-				((it->ontime + it->delay) < time(NULL)))
-			reset_item(it);
+		libt_remove_timeout(reset_item, it);
+		if (!isnan(it->delay) && !isnan(it->ontime))
+			libt_add_timeout(it->ontime + it->delay - libt_now(), reset_item, it);
 		return;
 	}
 	/* find topic */
@@ -186,14 +191,16 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 
 	if (!msg->payloadlen)
 		return;
-	if (it->resetvalue && !strcmp(it->resetvalue, (char *)msg->payload))
-		it->ontime = 0;
-	else if (!it->resetvalue && !strtoul(msg->payload, NULL, 0))
-		/* clear ontime */
-		it->ontime = 0;
-	else if (!it->ontime)
+	if ((it->resetvalue && !strcmp(it->resetvalue, (char *)msg->payload)) ||
+		       (it->resetvalue && !strtoul(msg->payload, NULL, 0))) {
+		/* value was reset */
+		libt_remove_timeout(reset_item, it);
+		it->ontime = NAN;
+	} else if (isnan(it->ontime)) {
 		/* set ontime only on first set */
-		it->ontime = time(NULL);
+		it->ontime = libt_now();
+		libt_add_timeout(it->delay, reset_item, it);
+	}
 }
 
 static void my_exit(void)
@@ -205,9 +212,7 @@ static void my_exit(void)
 int main(int argc, char *argv[])
 {
 	int opt, ret;
-	struct item *it;
 	char *str;
-	time_t now;
 	char mqtt_name[32];
 
 	/* argument parsing */
@@ -270,12 +275,8 @@ int main(int argc, char *argv[])
 	}
 
 	while (1) {
-		time(&now);
-		for (it = items; it; it = it->next) {
-			if (it->ontime && it->delay && ((it->ontime + it->delay) < now))
-				reset_item(it);
-		}
-		ret = mosquitto_loop(mosq, 1000, 1);
+		libt_flush();
+		ret = mosquitto_loop(mosq, libt_get_waittime(), 1);
 		if (ret)
 			mylog(LOG_ERR, "mosquitto_loop: %s", mosquitto_strerror(ret));
 	}
