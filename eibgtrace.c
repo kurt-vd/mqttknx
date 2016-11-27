@@ -31,19 +31,21 @@ static const char help_msg[] =
 	"\n"
 	"Options\n"
 	" -V, --version		Show version\n"
+	" -s, --syslog		Log to syslog\n"
 	;
 
 #ifdef _GNU_SOURCE
 static struct option long_opts[] = {
 	{ "help", no_argument, NULL, '?', },
 	{ "version", no_argument, NULL, 'V', },
+	{ "syslog", no_argument, NULL, 's', },
 	{ },
 };
 #else
 #define getopt_long(argc, argv, optstring, longopts, longindex) \
 	getopt((argc), (argv), (optstring))
 #endif
-static const char optstring[] = "V?";
+static const char optstring[] = "V?s";
 
 struct item {
 	struct item *next;
@@ -53,6 +55,7 @@ struct item {
 
 /* EIB parameters */
 static const char *eib_uri = "ip:localhost";
+static int syslog;
 
 /* State */
 static EIBConnection *eib;
@@ -107,12 +110,13 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "%s %s\nCompiled on %s %s\n",
 				NAME, VERSION, __DATE__, __TIME__);
 		exit(0);
+	case 's':
+		logtosyslog = 1;
+		break;
 
-	case '?':
-		fputs(help_msg, stderr);
-		exit(0);
 	default:
 		fprintf(stderr, "unknown option '%c'", opt);
+	case '?':
 		fputs(help_msg, stderr);
 		exit(1);
 		break;
@@ -161,8 +165,12 @@ int main(int argc, char *argv[])
 			for (j = 0; j < ret; ++j)
 				value = (value << 8) + buf[2+j];
 		}
-		printf("%s\t%s\t%s\t%u\n", nowstr(), eibphysstr(src), eibgroupstr(dst), value);
-		fflush(stdout);
+		if (syslog)
+			syslog(LOG_INFO, "%s %s %u\n", eibphysstr(src), eibgroupstr(dst), value);
+		else {
+			printf("%s %s %s %u\n", nowstr(), eibphysstr(src), eibgroupstr(dst), value);
+			fflush(stdout);
+		}
 	}
 
 	return 0;

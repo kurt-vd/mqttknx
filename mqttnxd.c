@@ -108,9 +108,9 @@ struct cache {
 
 static struct cache *cache[64*1024];
 
-static struct cache *getcache(eibaddr_t addr)
+static struct cache *getcache(eibaddr_t addr, int autocreate)
 {
-	if (!cache[addr]) {
+	if (!cache[addr] && autocreate) {
 		cache[addr] = malloc(sizeof(struct cache));
 		memset(cache[addr], 0, sizeof(struct cache));
 	}
@@ -119,7 +119,7 @@ static struct cache *getcache(eibaddr_t addr)
 
 static void updcache(eibaddr_t addr, int dir, const void *dat, int len)
 {
-	struct cache *c = getcache(addr);
+	struct cache *c = getcache(addr, 1);
 
 	c->dir = dir;
 	if (len > c->size) {
@@ -133,7 +133,7 @@ static void updcache(eibaddr_t addr, int dir, const void *dat, int len)
 
 static int cmpcache(eibaddr_t addr, int dir, const void *dat, int len)
 {
-	struct cache *c = getcache(addr);
+	struct cache *c = getcache(addr, 1);
 
 	if (c->dir != dir)
 		return -1;
@@ -216,12 +216,22 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 	if (!strcmp(topicsuffix, "/request")) {
 		static const uint8_t shortdat[2] = { 0, 0, };
 
+ask_eibd:
 		ret = EIBSendGroup(eib, dst, sizeof(shortdat), shortdat);
 		if (ret < 0)
 			mylog(LOG_ERR, "EIB: send %s failed", eibgaddrtostr(dst));
 	} else if (!*topicsuffix) {
 		uint8_t shortdat[2] = { 0, 0x80, };
 
+		if (!getcache(dst, 0)) {
+			/* this topic has not been seen before
+			 * ignore this update (it's probably a retained cache from the mqtt broker)
+			 * and instead as eibd for an update
+			 */
+			/* sleep 5 ms to delay all requests */
+			usleep(5000);
+			goto ask_eibd;
+		}
 		if (!cmpcache(dst, DIR_E_M, msg->payload, msg->payloadlen)) {
 			/* ignore my echo */
 			updcache(dst, DIR_NONE, msg->payload, msg->payloadlen);
