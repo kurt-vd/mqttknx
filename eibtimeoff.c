@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <unistd.h>
 #include <getopt.h>
@@ -55,6 +56,7 @@ struct item {
 	struct item *next;
 	eibaddr_t group;
 	int delay;
+	int ontime;
 };
 
 /* EIB parameters */
@@ -142,6 +144,7 @@ int main(int argc, char *argv[])
 	uint32_t value;
 	eibaddr_t src, dst;
 	uint8_t buf[32];
+	time_t now;
 
 	/* argument parsing */
 	while ((opt = getopt_long(argc, argv, optstring, long_opts, NULL)) >= 0)
@@ -197,13 +200,15 @@ int main(int argc, char *argv[])
 	pf[0].events = POLL_IN;
 	/* run */
 	while (1) {
-		if (sigalrm) {
+		time(&now);
+		for (it = items; it; it = it->next) {
 			static uint8_t dat[2] = { 0x00, 0x80, };
 
-			sigalrm = 0;
-			ret = EIBSendGroup(eib, items->group, sizeof(dat), dat);
-			if (ret < 0)
-				mylog(LOG_ERR, "EIB: send %s failed", eibgroupstr(items->group));
+			if (it->ontime && it->delay && ((it->ontime + it->delay) < now)) {
+				ret = EIBSendGroup(eib, items->group, sizeof(dat), dat);
+				if (ret < 0)
+					mylog(LOG_ERR, "EIB: send %s failed", eibgroupstr(items->group));
+			}
 		}
 		ret = poll(pf, 1, 1000);
 		if (ret < 0 && errno == EINTR)
@@ -238,9 +243,12 @@ int main(int argc, char *argv[])
 			for (j = 0; j < ret; ++j)
 				value = (value << 8) + buf[2+j];
 		}
-		if (dst == items->group) {
-			/* schedule (or cancel) next alarm */
-			alarm(value ? items->delay : 0);
+		if (value) {
+			time(&now);
+			for (it = items; it; it = it->next) {
+				if (dst == it->group)
+					it->ontime = now;
+			}
 		}
 	}
 
