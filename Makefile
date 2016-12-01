@@ -19,6 +19,7 @@ eibtimeoff eibgtrace: LDLIBS:=-leibclient $(LDLIBS) -lrt
 mqttnxd: LDLIBS:=-lmosquitto -leibclient $(LDLIBS)
 mqttoff: LDLIBS:=-lmosquitto $(LDLIBS)
 mqttoff: lib/libt.o
+mqttnxd: lib/libt.o
 
 install: $(PROGS)
 	$(foreach PROG, $(PROGS), install -vp -m 0777 $(INSTOPTS) $(PROG) $(DESTDIR)$(PREFIX)/bin/$(PROG);)
