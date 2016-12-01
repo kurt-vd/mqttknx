@@ -116,11 +116,11 @@ double libt_now(void)
 #endif
 }
 
-void libt_add_timeout(double timeout, void (*fn)(void *), const void *dat)
+void libt_add_timeouta(double wakeuptime, void (*fn)(void *), const void *dat)
 {
 	struct timer *t;
 
-	if (isnan(timeout))
+	if (isnan(wakeuptime))
 		return;
 	t = t_find(fn, dat);
 	if (!t) {
@@ -133,7 +133,7 @@ void libt_add_timeout(double timeout, void (*fn)(void *), const void *dat)
 		t->fn = fn;
 		t->dat = (void *)dat;
 	}
-	t->wakeup = libt_now() + timeout;
+	t->wakeup = wakeuptime;
 	t_add_sorted(t, &s.timers);
 }
 

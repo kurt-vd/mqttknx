@@ -26,7 +26,11 @@ extern "C" {
 extern double libt_now(void);
 
 /* schedule a timeout @timerout seconds in the future */
-extern void libt_add_timeout(double timeout, void (*fn)(void *), const void *dat);
+extern void libt_add_timeouta(double wakeuptime, void (*fn)(void *), const void *dat);
+static inline void libt_add_timeout(double timeout, void (*fn)(void *), const void *dat)
+{
+	libt_add_timeouta(timeout+libt_now(), fn, dat);
+}
 
 /* repeat a previously scheduled timeout, @increment seconds further
  * When no matching scheduled timeout is found, this is identical to
