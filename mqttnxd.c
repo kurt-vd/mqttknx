@@ -343,12 +343,11 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 	case 0x0080:
 		/* write */
 		value = eib_value(hdr, dat, len);
-		if (c->epending) {
+		c->emvalue = value;
+		if (c->epending)
 			--c->epending;
-		} else {
-			mylog(LOG_INFO, "eib:%s %s %i", "write", eibgaddrtostr(dst), value);
-			my_mqtt_push_value(dst, value);
-		}
+		mylog(LOG_INFO, "eib:%s %s %i", "write", eibgaddrtostr(dst), value);
+		my_mqtt_push_value(dst, value);
 		break;
 	}
 }
