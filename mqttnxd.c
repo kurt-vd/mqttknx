@@ -36,6 +36,7 @@ static const char help_msg[] =
 	"\n"
 	"Options\n"
 	" -V, --version		Show version\n"
+	" -v, --verbose		Be more verbose\n"
 	" -e, --eib=URI		Specify alternate EIB uri\n"
 	"			Like ip:xxx or usb: or ...\n"
 	" -m, --mqtt=HOST[:PORT]Specify alternate MQTT host+port\n"
@@ -46,6 +47,7 @@ static const char help_msg[] =
 static struct option long_opts[] = {
 	{ "help", no_argument, NULL, '?', },
 	{ "version", no_argument, NULL, 'V', },
+	{ "verbose", no_argument, NULL, 'v', },
 
 	{ "eib", required_argument, NULL, 'e', },
 	{ "mqtt", required_argument, NULL, 'm', },
@@ -57,7 +59,7 @@ static struct option long_opts[] = {
 #define getopt_long(argc, argv, optstring, longopts, longindex) \
 	getopt((argc), (argv), (optstring))
 #endif
-static const char optstring[] = "V?e:m:p:";
+static const char optstring[] = "Vv?e:m:p:";
 
 /* signal handler */
 static volatile int sigterm;
@@ -368,6 +370,7 @@ int main(int argc, char *argv[])
 	eibaddr_t src, dst;
 	int pkthdr;
 	uint8_t buf[32];
+	int logmask = LOG_UPTO(LOG_NOTICE);
 
 	/* argument parsing */
 	while ((opt = getopt_long(argc, argv, optstring, long_opts, NULL)) >= 0)
@@ -376,6 +379,16 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "%s %s\nCompiled on %s %s\n",
 				NAME, VERSION, __DATE__, __TIME__);
 		exit(0);
+	case 'v':
+		switch (logmask) {
+		case LOG_UPTO(LOG_NOTICE):
+			logmask = LOG_UPTO(LOG_INFO);
+			break;
+		case LOG_UPTO(LOG_INFO):
+			logmask = LOG_UPTO(LOG_DEBUG);
+			break;
+		}
+		break;
 	case 'e':
 		eib_uri = optarg;
 		break;
@@ -406,7 +419,8 @@ int main(int argc, char *argv[])
 	signal(SIGINT, sighandler);
 	//atexit(my_exit);
 
-	openlog(NAME, LOG_CONS | LOG_PERROR, LOG_LOCAL2);
+	openlog(NAME, LOG_PERROR, LOG_LOCAL2);
+	setlogmask(logmask);
 	/* MQTT start */
 	mosquitto_lib_init();
 	mosq = mosquitto_new(csprintf("eibd:%s #%i", eib_uri, getpid()), true, 0);

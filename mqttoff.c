@@ -37,6 +37,7 @@ static const char help_msg[] =
 	"\n"
 	"Options\n"
 	" -V, --version		Show version\n"
+	" -v, --verbose		Be more verbose\n"
 	" -m, --mqtt=HOST[:PORT]Specify alternate MQTT host+port\n"
 	" -s, --suffix=STR	Give MQTT topic suffix for timeouts (default '~')\n"
 	"\n"
@@ -48,6 +49,7 @@ static const char help_msg[] =
 static struct option long_opts[] = {
 	{ "help", no_argument, NULL, '?', },
 	{ "version", no_argument, NULL, 'V', },
+	{ "verbose", no_argument, NULL, 'v', },
 
 	{ "mqtt", required_argument, NULL, 'm', },
 	{ "suffix", required_argument, NULL, 's', },
@@ -58,7 +60,7 @@ static struct option long_opts[] = {
 #define getopt_long(argc, argv, optstring, longopts, longindex) \
 	getopt((argc), (argv), (optstring))
 #endif
-static const char optstring[] = "V?m:s:";
+static const char optstring[] = "Vv?m:s:";
 
 /* signal handler */
 static volatile int sigterm;
@@ -214,6 +216,7 @@ int main(int argc, char *argv[])
 	int opt, ret;
 	char *str;
 	char mqtt_name[32];
+	int logmask = LOG_UPTO(LOG_NOTICE);
 
 	/* argument parsing */
 	while ((opt = getopt_long(argc, argv, optstring, long_opts, NULL)) >= 0)
@@ -222,6 +225,16 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "%s %s\nCompiled on %s %s\n",
 				NAME, VERSION, __DATE__, __TIME__);
 		exit(0);
+	case 'v':
+		switch (logmask) {
+		case LOG_UPTO(LOG_NOTICE):
+			logmask = LOG_UPTO(LOG_INFO);
+			break;
+		case LOG_UPTO(LOG_INFO):
+			logmask = LOG_UPTO(LOG_DEBUG);
+			break;
+		}
+		break;
 	case 'm':
 		mqtt_host = optarg;
 		str = strrchr(optarg, ':');
@@ -247,7 +260,8 @@ int main(int argc, char *argv[])
 	}
 
 	atexit(my_exit);
-	openlog(NAME, LOG_CONS | LOG_PERROR, LOG_LOCAL2);
+	openlog(NAME, LOG_PERROR, LOG_LOCAL2);
+	setlogmask(logmask);
 
 	/* MQTT start */
 	mosquitto_lib_init();
