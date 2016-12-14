@@ -189,7 +189,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 
 		libt_remove_timeout(reset_item, it);
 		if (!isnan(it->delay) && !isnan(it->ontime))
-			libt_add_timeout(it->ontime + it->delay - libt_now(), reset_item, it);
+			libt_add_timeouta(it->ontime + it->delay, reset_item, it);
 		return;
 	}
 	/* find topic */
@@ -205,7 +205,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 	} else if (isnan(it->ontime)) {
 		/* set ontime only on first set */
 		it->ontime = libt_now();
-		libt_add_timeout(it->delay, reset_item, it);
+		libt_add_timeouta(it->ontime + it->delay, reset_item, it);
 	}
 }
 
