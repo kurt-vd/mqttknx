@@ -130,13 +130,16 @@ static void reset_item(void *dat)
 {
 	int ret;
 	struct item *it = dat;
+	char *settopic;
 
-	ret = mosquitto_publish(mosq, NULL, it->topic, strlen(it->resetvalue ?: "0"), it->resetvalue ?: "0", mqtt_qos, 1);
+	asprintf(&settopic, "%s/set", it->topic);
+	ret = mosquitto_publish(mosq, NULL, settopic, strlen(it->resetvalue ?: "0"), it->resetvalue ?: "0", mqtt_qos, 1);
 	if (ret < 0)
 		mylog(LOG_ERR, "mosquitto_publish %s: %s", it->topic, mosquitto_strerror(ret));
 	/* clear cache too */
 	it->ontime = 0;
 	mylog(LOG_INFO, "%s = %s", it->topic, it->resetvalue ?: "0");
+	free(settopic);
 }
 
 static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitto_message *msg)
