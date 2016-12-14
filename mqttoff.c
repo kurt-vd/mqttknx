@@ -122,6 +122,7 @@ static struct item *get_item(const char *topic)
 
 	/* insert in linked list */
 	it->next = items;
+	it->ontime = it->delay = NAN;
 	items = it;
 	return it;
 }
