@@ -217,7 +217,7 @@ static void my_exit(void)
 
 int main(int argc, char *argv[])
 {
-	int opt, ret;
+	int opt, ret, waittime;
 	char *str;
 	char mqtt_name[32];
 	int logmask = LOG_UPTO(LOG_NOTICE);
@@ -294,7 +294,10 @@ int main(int argc, char *argv[])
 
 	while (1) {
 		libt_flush();
-		ret = mosquitto_loop(mosq, libt_get_waittime(), 1);
+		waittime = libt_get_waittime();
+		if (waittime > 1000)
+			waittime = 1000;
+		ret = mosquitto_loop(mosq, waittime, 1);
 		if (ret)
 			mylog(LOG_ERR, "mosquitto_loop: %s", mosquitto_strerror(ret));
 	}
