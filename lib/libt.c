@@ -116,6 +116,13 @@ double libt_now(void)
 #endif
 }
 
+void libt_add_timeout(double timeout, void (*fn)(void *), const void *dat)
+{
+	if (isnan(timeout))
+		return;
+	libt_add_timeouta(timeout+libt_now(), fn, dat);
+}
+
 void libt_add_timeouta(double wakeuptime, void (*fn)(void *), const void *dat)
 {
 	struct timer *t;
