@@ -2,7 +2,6 @@
 /mqttnxd
 /eibgtrace
 /eibtimeoff
-/mqttoff
 
 # temp
 *.o

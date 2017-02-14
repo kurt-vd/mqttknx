@@ -1,4 +1,4 @@
-PROGS	= mqttnxd eibtimeoff eibgtrace mqttoff
+PROGS	= mqttnxd eibtimeoff eibgtrace
 default	: $(PROGS)
 
 PREFIX	= /usr/local
@@ -17,8 +17,6 @@ CPPFLAGS += -DVERSION=\"$(VERSION)\"
 
 eibtimeoff eibgtrace: LDLIBS:=-leibclient $(LDLIBS) -lrt
 mqttnxd: LDLIBS:=-lmosquitto -leibclient $(LDLIBS)
-mqttoff: LDLIBS:=-lmosquitto $(LDLIBS)
-mqttoff: lib/libt.o
 mqttnxd: lib/libt.o
 
 install: $(PROGS)
