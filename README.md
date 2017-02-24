@@ -12,6 +12,3 @@ Trace EIB group address writes
 
 eibtimeoff is meant to turn off EIB group addresses after some timeout
 
-### mqttimeoff
-
-mqttimeoff resets mqtt parameters after some timeout
