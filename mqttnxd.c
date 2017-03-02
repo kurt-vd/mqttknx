@@ -38,7 +38,7 @@ static const char help_msg[] =
 	"Options\n"
 	" -V, --version		Show version\n"
 	" -v, --verbose		Be more verbose\n"
-	" -e, --eib=URI		Specify alternate EIB uri\n"
+	" -e, --eib=URI		Specify alternate EIB uri (default ip:localhost)\n"
 	"			Like ip:xxx or usb: or ...\n"
 	" -m, --mqtt=HOST[:PORT]Specify alternate MQTT host+port\n"
 	" -p, --prefix=STR	Give MQTT topic prefix for EIB messages (default 'eib')\n"
