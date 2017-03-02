@@ -44,7 +44,6 @@ static const char help_msg[] =
 	" -e, --eib=URI		Specify alternate EIB uri (default ip:localhost)\n"
 	"			Like ip:xxx or usb: or ...\n"
 	" -m, --mqtt=HOST[:PORT]Specify alternate MQTT host+port\n"
-	" -p, --prefix=STR	Give MQTT topic prefix for EIB messages (default 'eib')\n"
 	" -s, --suffix=STR	Give EIB/KNX config topic suffix (default /eib)\n"
 	;
 
@@ -56,7 +55,6 @@ static struct option long_opts[] = {
 
 	{ "eib", required_argument, NULL, 'e', },
 	{ "mqtt", required_argument, NULL, 'm', },
-	{ "prefix", required_argument, NULL, 'p', },
 	{ "suffix", required_argument, NULL, 's', },
 
 	{ },
@@ -65,7 +63,7 @@ static struct option long_opts[] = {
 #define getopt_long(argc, argv, optstring, longopts, longindex) \
 	getopt((argc), (argv), (optstring))
 #endif
-static const char optstring[] = "Vv?e:m:p:s:";
+static const char optstring[] = "Vv?e:m:s:";
 
 /* signal handler */
 static volatile int sigterm;
@@ -94,7 +92,6 @@ static const char *csprintf(const char *fmt, ...)
 /* MQTT parameters */
 static const char *mqtt_host = "localhost";
 static int mqtt_port = 1883;
-static const char *mqtt_prefix = "eib";
 static int mqtt_keepalive = 10;
 static int mqtt_qos = 2;
 static char *eib_suffix = "/eib";
@@ -461,9 +458,6 @@ int main(int argc, char *argv[])
 			mqtt_port = strtoul(str+1, NULL, 10);
 		}
 		break;
-	case 'p':
-		mqtt_prefix = optarg;
-		break;
 	case 's':
 		eib_suffix = optarg;
 		eib_suffixlen = strlen(eib_suffix);
@@ -490,7 +484,7 @@ int main(int argc, char *argv[])
 	mosq = mosquitto_new(csprintf("eibd:%s #%i", eib_uri, getpid()), true, 0);
 	if (!mosq)
 		mylog(LOG_ERR, "mosquitto_new failed: %s", ESTR(errno));
-	mosquitto_will_set(mosq, mqtt_prefix, 0, NULL, mqtt_qos, 1);
+	//mosquitto_will_set(mosq, mqtt_prefix, 0, NULL, mqtt_qos, 1);
 
 	mosquitto_log_callback_set(mosq, my_mqtt_log);
 	mosquitto_connect_callback_set(mosq, my_mqtt_connect);
