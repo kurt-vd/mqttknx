@@ -33,8 +33,11 @@
 /* program options */
 static const char help_msg[] =
 	NAME ": an EIB/KNX - MQTT coupler\n"
-	"usage:	" NAME " [OPTIONS ...]\n"
+	"usage:	" NAME " [OPTIONS ...] [PATTERN ...]\n"
 	"\n"
+	" PATTERN	MQTT pattern to subscribe to\n"
+	"		Multiple patterns are allowed\n"
+	"		Default is '#'\n"
 	"Options\n"
 	" -V, --version		Show version\n"
 	" -v, --verbose		Be more verbose\n"
@@ -427,6 +430,7 @@ int main(int argc, char *argv[])
 	int pkthdr;
 	uint8_t buf[32];
 	int logmask = LOG_UPTO(LOG_NOTICE);
+	char **topics;
 
 	/* argument parsing */
 	while ((opt = getopt_long(argc, argv, optstring, long_opts, NULL)) >= 0)
@@ -496,10 +500,13 @@ int main(int argc, char *argv[])
 	if (ret)
 		mylog(LOG_ERR, "mosquitto_connect %s:%i: %s", mqtt_host, mqtt_port, mosquitto_strerror(ret));
 
-	//ret = mosquitto_subscribe(mosq, NULL, csprintf("#", mqtt_prefix), mqtt_qos);
-	ret = mosquitto_subscribe(mosq, NULL, "#", mqtt_qos);
-	if (ret)
-		mylog(LOG_ERR, "mosquitto_subscribe '#': %s", mosquitto_strerror(ret));
+	/* subscribe to topics */
+	topics = (optind >= argc) ? ((char *[]){ "#", NULL, }) : (argv+optind);
+	for (; topics; ++topics) {
+		ret = mosquitto_subscribe(mosq, NULL, *topics, mqtt_qos);
+		if (ret)
+			mylog(LOG_ERR, "mosquitto_subscribe %s: %s", *topics, mosquitto_strerror(ret));
+	}
 
 	/* EIB start */
 	eib = EIBSocketURL(eib_uri);
