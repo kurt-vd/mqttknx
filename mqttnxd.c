@@ -341,16 +341,23 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			if (addr != it->addr) {
 				if (eibtable[it->addr] == it)
 					eibtable[it->addr] = NULL;
-				if (eibtable[addr])
-					mylog(LOG_WARNING, "%s = %s: eib addr is occupied else",
-							msg->topic, (char *)msg->payload);
-				else
-					eibtable[addr] = it;
 				/* clear pending requests for old addr ... */
 				libt_remove_timeout(my_mqtt_clear_cache, compose_eib_param(it->addr, 0, 0x0000));
 				libt_remove_timeout(my_eib_send_or_clear_cache, compose_eib_param(it->addr, 0, 0x0000));
 				it->flags &= ~FL_EIB_SEEN;
 				it->addr = addr;
+				/* process new addr */
+				if (eibtable[addr]) {
+					mylog(LOG_WARNING, "%s = %s: eib addr is occupied by %s",
+							msg->topic, (char *)msg->payload,
+							eibtable[addr]->topic);
+					/* we're about to kick the previous entry
+					 * first copy the EIB cache :-)
+					 */
+					it->flags |= eibtable[addr]->flags & FL_EIB_SEEN;
+					it->evalue = eibtable[addr]->evalue;
+				}
+				eibtable[addr] = it;
 			}
 		}
 		/* parse flags */
@@ -457,6 +464,12 @@ static void my_exit(void)
 		EIBClose(eib);
 }
 
+static void test_config_seen(void *dat)
+{
+	if (!items)
+		mylog(LOG_WARNING, "no items have been configured, it seems");
+}
+
 int main(int argc, char *argv[])
 {
 	int opt, ret, not;
@@ -475,6 +488,14 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "%s %s\nCompiled on %s %s\n",
 				NAME, VERSION, __DATE__, __TIME__);
 		exit(0);
+	case '?':
+		fputs(help_msg, stderr);
+		exit(0);
+	default:
+		fprintf(stderr, "unknown option '%c'", opt);
+		fputs(help_msg, stderr);
+		exit(1);
+		break;
 	case 'v':
 		switch (logmask) {
 		case LOG_UPTO(LOG_NOTICE):
@@ -501,14 +522,6 @@ int main(int argc, char *argv[])
 		eib_suffix = optarg;
 		eib_suffixlen = strlen(eib_suffix);
 		break;
-
-	case '?':
-		fputs(help_msg, stderr);
-		exit(0);
-	default:
-		fprintf(stderr, "unknown option '%c'", opt);
-		fputs(help_msg, stderr);
-		exit(1);
 	case 'o':
 		subopts = optarg;
 		while (*subopts) {
@@ -567,6 +580,7 @@ int main(int argc, char *argv[])
 	pf[1].events = POLL_IN;
 
 	/* run */
+	libt_add_timeout(2, test_config_seen, NULL);
 	while (!sigterm) {
 		libt_flush();
 		ret = libt_get_waittime();
