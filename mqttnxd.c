@@ -45,13 +45,31 @@ static const char help_msg[] =
 	"			Like ip:xxx or usb: or ...\n"
 	" -m, --mqtt=HOST[:PORT]Specify alternate MQTT host+port\n"
 	" -s, --suffix=STR	Give EIB/KNX config topic suffix (default /eib)\n"
+	"\n"
+	" -o, --options=OPT[,OPT,...]	Specify Perform the protocol elements in the enumeration\n"
+	"				Do not perform the elements that are prefixed with no-\n"
+	"	 mqttcache	Use retained values from MQTT\n"
+	"			Without this, retained msgs from MQTT are ignored, not propagated\n"
+	"	 eibstate	Grab initial state from EIB/KNX\n"
 	;
+
+static char *const subopttable[] = {
+	"mqttcache",
+#define O_MQTTCACHE		(1 << 0)
+	"eibstate",
+#define O_EIBSTATE		(1 << 1)
+	/* max 16 items, otherwise, modify FL_ macros */
+	NULL,
+};
+
+static int options;
 
 #ifdef _GNU_SOURCE
 static struct option long_opts[] = {
 	{ "help", no_argument, NULL, '?', },
 	{ "version", no_argument, NULL, 'V', },
 	{ "verbose", no_argument, NULL, 'v', },
+	{ "options", required_argument, NULL, 'o', },
 
 	{ "eib", required_argument, NULL, 'e', },
 	{ "mqtt", required_argument, NULL, 'm', },
@@ -63,7 +81,7 @@ static struct option long_opts[] = {
 #define getopt_long(argc, argv, optstring, longopts, longindex) \
 	getopt((argc), (argv), (optstring))
 #endif
-static const char optstring[] = "Vv?e:m:s:";
+static const char optstring[] = "Vv?o:e:m:s:";
 
 /* signal handler */
 static volatile int sigterm;
@@ -115,6 +133,9 @@ struct item {
 #define FL_EIB_SEEN		0x01
 #define FL_ANSWER		0x02
 #define FL_VOLATILE		0x04
+#define FL_MQTT_SEEN		0x08
+#define FL_PREF_EIB		0x10
+#define FL_PREF_MQTT		0x20
 	eibaddr_t addr;
 	char *topic;
 };
@@ -335,11 +356,18 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		/* parse flags */
 		setresetflag(&it->flags, FL_VOLATILE, !!strchr(str, 'v'));
 		setresetflag(&it->flags, FL_ANSWER, !!strchr(str, 'a'));
+		setresetflag(&it->flags, FL_PREF_EIB, strchr(str, 'e') || (!(it->flags & FL_VOLATILE) && (options & O_EIBSTATE)));
+		setresetflag(&it->flags, FL_PREF_MQTT, strchr(str, 'm') || (!(it->flags & FL_VOLATILE) && (options & O_MQTTCACHE)));
+		if ((it->flags & (FL_VOLATILE | FL_PREF_EIB | FL_PREF_MQTT)) == FL_VOLATILE)
+			mylog(LOG_WARNING, "%s: configured volatile with no preferred source!", it->topic);
 
 		/* refresh cache */
-		if (!(it->flags & FL_EIB_SEEN))
+		if ((it->flags & (FL_PREF_EIB | FL_EIB_SEEN | FL_VOLATILE)) == FL_PREF_EIB)
 			/* schedule eib request */
 			libt_add_timeouta(next_eib_timeslot(), my_eib_send_or_clear_cache, compose_eib_param(it->addr, 0, 0x0000));
+		if ((it->flags & (FL_PREF_MQTT | FL_MQTT_SEEN | FL_VOLATILE)) == (FL_PREF_MQTT | FL_MQTT_SEEN))
+			/* propagate MQTT cached value to EIB */
+			libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->addr, it->mvalue, 0x0080));
 		return;
 	}
 	/* find entry */
@@ -347,10 +375,20 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 	if (!it)
 		return;
 	it->mvalue = strtoul(msg->payload ?: "0", NULL, 0);
-	/* need to forward: volatile or new or changed */
-	if ((it->flags & FL_VOLATILE) || !(it->flags & FL_EIB_SEEN) || (it->evalue != it->mvalue))
-		/* schedule eib write */
-		libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->addr, it->mvalue, 0x0080));
+
+	if ((it->flags & FL_VOLATILE) && !(it->flags & FL_PREF_MQTT))
+		/* volatile message configured to flow from KNX to MQTT */
+		goto blocked;
+	if (!(it->flags & FL_VOLATILE) && !(it->flags & FL_PREF_MQTT) && msg->retain)
+		/* ignore this MQTT retained msg, cache is not taken from MQTT */
+		goto blocked;
+	if (!(it->flags & FL_VOLATILE) && (it->flags & FL_MQTT_SEEN) && (it->evalue == it->mvalue))
+		/* skip identical messages */
+		goto blocked;
+	/* schedule eib write */
+	libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->addr, it->mvalue, 0x0080));
+blocked:
+	it->flags |= FL_MQTT_SEEN;
 }
 
 /* EIB events */
@@ -392,7 +430,8 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 		libt_remove_timeout(my_mqtt_clear_cache, compose_eib_param(dst, 0, 0x0000));
 		it->evalue = eib_value(hdr, dat, len);
 		mylog(LOG_INFO, "eib:<%s %s %i", eibactions[cmd >> 6] ?: "?", eibgaddrtostr(dst), it->evalue);
-		if ((it->flags & FL_VOLATILE) || !(it->flags & FL_EIB_SEEN) || (it->evalue != it->mvalue)) {
+		if (((it->flags & FL_VOLATILE) && (it->flags & FL_PREF_EIB)) ||
+				(!(it->flags & FL_VOLATILE) && (!(it->flags & FL_EIB_SEEN) || (it->evalue != it->mvalue)))) {
 			/* forward volatile or new or changed entries */
 			sprintf(sbuf, "%i", it->evalue);
 			/* push in MQTT, retain if not volatile */
@@ -420,9 +459,9 @@ static void my_exit(void)
 
 int main(int argc, char *argv[])
 {
-	int opt, ret;
+	int opt, ret, not;
 	struct pollfd pf[2] = {};
-	char *str;
+	char *str, *subopts;
 	eibaddr_t src, dst;
 	int pkthdr;
 	uint8_t buf[32];
@@ -470,6 +509,17 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "unknown option '%c'", opt);
 		fputs(help_msg, stderr);
 		exit(1);
+	case 'o':
+		subopts = optarg;
+		while (*subopts) {
+			not = !strncmp(subopts, "no-", 3);
+			if (not)
+				subopts += 3;
+			opt = getsubopt(&subopts, subopttable, &optarg);
+			if (opt < 0)
+				break;
+			setresetflag(&options, 1 << opt, !not);
+		}
 		break;
 	}
 
