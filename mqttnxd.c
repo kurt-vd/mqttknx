@@ -559,7 +559,7 @@ int main(int argc, char *argv[])
 
 	/* subscribe to topics */
 	topics = (optind >= argc) ? ((char *[]){ "#", NULL, }) : (argv+optind);
-	for (; topics; ++topics) {
+	for (; *topics; ++topics) {
 		ret = mosquitto_subscribe(mosq, NULL, *topics, mqtt_qos);
 		if (ret)
 			mylog(LOG_ERR, "mosquitto_subscribe %s: %s", *topics, mosquitto_strerror(ret));
