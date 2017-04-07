@@ -1,13 +1,13 @@
-# mqttnxd
+# mqttknxd
 
-mqttnxd is a bridge between [eibd][] and [MQTT][]
+mqttknxd is a bridge between [eibd][] and [MQTT][]
 
 # example use
 ## binaries
 
 Run these commands (or start with your init system).
 
-	$ mqttnxd -v &
+	$ mqttknxd -v &
 
 For auto-turn-off function, use mqttoff too:
 

@@ -16,7 +16,7 @@
 
 #include "lib/libt.h"
 
-#define NAME "mqttnxd"
+#define NAME "mqttknxd"
 #ifndef VERSION
 #define VERSION "<undefined version>"
 #endif

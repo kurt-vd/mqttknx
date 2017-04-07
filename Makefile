@@ -1,4 +1,4 @@
-PROGS	= mqttnxd eibtimeoff eibgtrace
+PROGS	= mqttknxd eibtimeoff eibgtrace
 default	: $(PROGS)
 
 PREFIX	= /usr/local
@@ -16,8 +16,8 @@ VERSION := $(shell git describe --tags --always)
 CPPFLAGS += -DVERSION=\"$(VERSION)\"
 
 eibtimeoff eibgtrace: LDLIBS:=-leibclient $(LDLIBS) -lrt
-mqttnxd: LDLIBS:=-lmosquitto -leibclient $(LDLIBS)
-mqttnxd: lib/libt.o
+mqttknxd: LDLIBS:=-lmosquitto -leibclient $(LDLIBS)
+mqttknxd: lib/libt.o
 
 install: $(PROGS)
 	$(foreach PROG, $(PROGS), install -vp -m 0777 $(INSTOPTS) $(PROG) $(DESTDIR)$(PREFIX)/bin/$(PROG);)
