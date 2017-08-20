@@ -384,24 +384,18 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 	it = topictoitem(msg->topic);
 	if (!it)
 		return;
-	it->mvalue = strtoul(msg->payload ?: "0", NULL, 0);
 
-	if (item_option(it, 'v') && !item_option(it, 'm'))
-		/* volatile message configured not to flow from MQTT to KNX */
-		goto nosend;
-	if (!item_option(it, 'v') && !item_option(it, 'm') && msg->retain)
-		/* ignore this MQTT retained msg, cache is not taken from MQTT */
-		goto done;
-	if (!item_option(it, 'v') && (it->flags & FL_MQTT_SEEN) && (it->evalue == it->mvalue))
-		/* skip identical messages */
-		goto nosend;
+	it->mvalue = strtoul(msg->payload ?: "0", NULL, 0);
 	/* schedule eib write */
-	if (it->naddr && item_option(it, 't'))
+	if (it->naddr && item_option(it, 't') && (
+				/* volatile message configured not to flow from MQTT to KNX */
+				(item_option(it, 'm') && item_option(it, 'v')) ||
+				/* MQTT retained msg, cache is taken from MQTT */
+				(item_option(it, 'm') && msg->retain) ||
+				/* new data in message */
+				(!item_option(it, 'v') && (!(it->flags & FL_EIB_SEEN) || (it->evalue != it->mvalue)))))
 		libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->paddr[0], it->mvalue, 0x0080));
-nosend:
 	it->flags |= FL_MQTT_SEEN;
-done:
-	;
 }
 
 /* EIB events */
@@ -453,10 +447,9 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 					continue;
 				mylog(LOG_INFO, "%s matches %s:%i", eibgaddrtostr(dst), it->topic, naddr);
 				/* process response */
-				it->evalue = evalue;
 				if (item_option(it, 'w') &&
 						((item_option(it, 'v') && item_option(it, 'e')) ||
-						 (!item_option(it, 'v') && (!(it->flags & FL_EIB_SEEN) || (it->evalue != it->mvalue))))) {
+						 (!item_option(it, 'v') && (!(it->flags & FL_MQTT_SEEN) || (evalue != it->mvalue))))) {
 					/* forward volatile or new or changed entries */
 					sprintf(sbuf, "%i", it->evalue);
 					/* push in MQTT, retain if not volatile */
@@ -465,6 +458,8 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 					if (ret)
 						mylog(LOG_ERR, "mosquitto_publish %s '%s': %s", it->topic, sbuf, mosquitto_strerror(ret));
 				}
+				/* update local cache */
+				it->evalue = evalue;
 				it->flags |= FL_EIB_SEEN;
 			}
 		}
