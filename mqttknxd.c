@@ -372,10 +372,10 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			mylog(LOG_WARNING, "%s: configured volatile with no preferred source!", it->topic);
 
 		/* refresh cache */
-		if (it->naddr && !item_option(it, 'v') && item_option(it, 'e') && !(it->flags & FL_EIB_SEEN))
+		if (it->naddr && !item_option(it, 'v') && item_option(it, 'e') && !(it->flags & FL_EIB_SEEN) && item_option(it, 'w'))
 			/* schedule eib request */
 			libt_add_timeouta(next_eib_timeslot(), my_eib_send_or_clear_cache, compose_eib_param(it->paddr[0], 0, 0x0000));
-		if (it->naddr && !item_option(it, 'v') && item_option(it, 'm') && (it->flags & FL_MQTT_SEEN))
+		if (it->naddr && !item_option(it, 'v') && item_option(it, 'm') && (it->flags & FL_MQTT_SEEN) && item_option(it, 't'))
 			/* propagate MQTT cached value to EIB */
 			libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->paddr[0], it->mvalue, 0x0080));
 		return;
