@@ -119,11 +119,7 @@ struct item {
 	struct item *next;
 	struct item *prev;
 
-	int evalue; /* last value on EIB */
 	int mvalue; /* last value on MQTT */
-	int flags;
-#define FL_EIB_SEEN		0x01
-#define FL_MQTT_SEEN		0x02
 	eibaddr_t *paddr;
 	int naddr;
 	int saddr;
@@ -354,8 +350,6 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			if (mqtt_write_suffix)
 				asprintf(&it->writetopic, "%s%s", it->topic, mqtt_write_suffix);
 			add_item(it);
-		} else {
-			it->flags &= ~FL_EIB_SEEN;
 		}
 		/* parse eibaddr */
 		it->naddr = 0;
@@ -383,10 +377,10 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		it->options = strcmp(str ?: "*", "*") ? strdup(str) : NULL;
 
 		/* refresh cache */
-		if (it->naddr && !item_option(it, 'r') && !(it->flags & FL_EIB_SEEN) && item_option(it, 'w'))
+		if (it->naddr && !item_option(it, 'r') && item_option(it, 'w'))
 			/* schedule eib request */
 			libt_add_timeouta(next_eib_timeslot(), my_eib_send_or_clear_cache, compose_eib_param(it->paddr[0], 0, 0x0000));
-		if (it->naddr && (it->flags & FL_MQTT_SEEN) && item_option(it, 't') && item_option(it, 'r'))
+		if (it->naddr && item_option(it, 't') && item_option(it, 'r'))
 			/* propagate MQTT cached value to EIB */
 			libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->paddr[0], it->mvalue, 0x0080));
 
@@ -410,7 +404,6 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		/* schedule eib write */
 		if (it->naddr && item_option(it, 't') && (item_option(it, 'r') || (!mqtt_write_suffix && !msg->retain)))
 			libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->paddr[0], it->mvalue, 0x0080));
-		it->flags |= FL_MQTT_SEEN;
 	}
 }
 
@@ -474,9 +467,6 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 					if (ret)
 						mylog(LOG_ERR, "mosquitto_publish %s '%s': %s", dsttopic, sbuf, mosquitto_strerror(ret));
 				}
-				/* update local cache */
-				it->evalue = evalue;
-				it->flags |= FL_EIB_SEEN;
 			}
 		}
 		break;
