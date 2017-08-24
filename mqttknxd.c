@@ -45,15 +45,12 @@ static const char help_msg[] =
 	"			Like ip:xxx or usb: or ...\n"
 	" -m, --mqtt=HOST[:PORT]Specify alternate MQTT host+port\n"
 	" -s, --suffix=STR	Give EIB/KNX config topic suffix (default /eib)\n"
-	" -f, --flags=BITFIELD	Specify default flags for EIB parameters (default 'wte')\n"
+	" -w, --write=STR	Give MQTT topic suffix for writing the topic (default empty)\n"
+	" -f, --flags=BITFIELD	Specify default flags for EIB parameters (default 'wt')\n"
 	"			BITFIELD is a sequence of characters of\n"
 	"			r	Respond to EIB read requests\n"
 	"			w	Update value on EIB writes/transmits\n"
 	"			t	Transmit value to EIB on change\n"
-	"			e	Grab initial state from EIB/KNX\n"
-	"			m	Propagate retained messages from MQTT\n"
-	"				This effectively grabs initial state from MQTT\n"
-	"			v	Volatile: do not cache anywhere\n"
 	;
 
 #ifdef _GNU_SOURCE
@@ -66,6 +63,7 @@ static struct option long_opts[] = {
 	{ "eib", required_argument, NULL, 'e', },
 	{ "mqtt", required_argument, NULL, 'm', },
 	{ "suffix", required_argument, NULL, 's', },
+	{ "write", required_argument, NULL, 'w', },
 
 	{ },
 };
@@ -73,7 +71,7 @@ static struct option long_opts[] = {
 #define getopt_long(argc, argv, optstring, longopts, longindex) \
 	getopt((argc), (argv), (optstring))
 #endif
-static const char optstring[] = "Vv?f:e:m:s:";
+static const char optstring[] = "Vv?f:e:m:s:w:";
 
 /* signal handler */
 static volatile int sigterm;
@@ -104,9 +102,10 @@ static const char *mqtt_host = "localhost";
 static int mqtt_port = 1883;
 static int mqtt_keepalive = 10;
 static int mqtt_qos = 2;
+static const char *mqtt_write_suffix;
 static char *eib_suffix = "/eib";
 static int eib_suffixlen = 4;
-static char *default_options = "wte";
+static char *default_options = "wt";
 
 /* EIB parameters */
 static const char *eib_uri = "ip:localhost";
@@ -130,6 +129,7 @@ struct item {
 	int saddr;
 	char *options;
 	char *topic;
+	char *writetopic;
 };
 static struct item *items;
 
@@ -172,15 +172,21 @@ static void delete_item(struct item *it)
 	if (it->paddr)
 		free(it->paddr);
 	free(it->topic);
+	if (it->writetopic)
+		free(it->writetopic);
 	free(it);
 }
 
-static struct item *topictoitem(const char *topic)
+static struct item *topictoitem(const char *topic, const char *suffix)
 {
 	struct item *it;
+	int len, slen;
+
+	len = strlen(topic);
+	slen = strlen(suffix ?: "");
 
 	for (it = items; it; it = it->next) {
-		if (!strcmp(it->topic, topic))
+		if (!strncmp(it->topic, topic, len - slen) && !it->topic[len])
 			return it;
 	}
 	return NULL;
@@ -310,25 +316,31 @@ static void my_eib_send_or_clear_cache(void *dat)
 	libt_add_timeout(1, my_mqtt_clear_cache, dat);
 }
 
+static int test_suffix(const char *topic, const char *suffix)
+{
+	int len;
+
+	len = strlen(topic ?: "") - strlen(suffix ?: "");
+	if (len < 0)
+		return 0;
+	/* match suffix */
+	return !strcmp(topic+len, suffix ?: "");
+}
+
 static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitto_message *msg)
 {
 	struct item *it;
-	int len;
 	char *endp;
 
 	mylog(LOG_INFO, "mqtt:<%s %s", msg->topic, (char *)msg->payload ?: "<null>");
-	len = strlen(msg->topic);
-	if (len > eib_suffixlen && !strcmp(msg->topic + len - eib_suffixlen, eib_suffix)) {
+	if (test_suffix(msg->topic, eib_suffix)) {
 		/* this is an EIB config parameter */
-		char *topic = strdup(msg->topic);
 		char *str;
 		eibaddr_t addr;
 
-		topic[len - eib_suffixlen] = 0;
-		it = topictoitem(topic);
+		it = topictoitem(msg->topic, eib_suffix);
 
 		if (!msg->payload) {
-			free(topic);
 			if (it)
 				delete_item(it);
 			return;
@@ -337,10 +349,12 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		if (!it) {
 			it = malloc(sizeof(*it));
 			memset(it, 0, sizeof(*it));
+			it->topic = strdup(msg->topic);
+			it->topic[strlen(it->topic) - eib_suffixlen] = 0;
+			if (mqtt_write_suffix)
+				asprintf(&it->writetopic, "%s%s", it->topic, mqtt_write_suffix);
 			add_item(it);
-			it->topic = topic;
 		} else {
-			free(topic);
 			it->flags &= ~FL_EIB_SEEN;
 		}
 		/* parse eibaddr */
@@ -368,34 +382,36 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			free(it->options);
 		it->options = strcmp(str ?: "*", "*") ? strdup(str) : NULL;
 
-		if (item_option(it, 'v') && !item_option(it, 'm') && !item_option(it, 'e'))
-			mylog(LOG_WARNING, "%s: configured volatile with no preferred source!", it->topic);
-
 		/* refresh cache */
-		if (it->naddr && !item_option(it, 'v') && item_option(it, 'e') && !(it->flags & FL_EIB_SEEN) && item_option(it, 'w'))
+		if (it->naddr && !item_option(it, 'r') && !(it->flags & FL_EIB_SEEN) && item_option(it, 'w'))
 			/* schedule eib request */
 			libt_add_timeouta(next_eib_timeslot(), my_eib_send_or_clear_cache, compose_eib_param(it->paddr[0], 0, 0x0000));
-		if (it->naddr && !item_option(it, 'v') && item_option(it, 'm') && (it->flags & FL_MQTT_SEEN) && item_option(it, 't'))
+		if (it->naddr && (it->flags & FL_MQTT_SEEN) && item_option(it, 't') && item_option(it, 'r'))
 			/* propagate MQTT cached value to EIB */
 			libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->paddr[0], it->mvalue, 0x0080));
-		return;
-	}
-	/* find entry */
-	it = topictoitem(msg->topic);
-	if (!it)
-		return;
 
-	it->mvalue = strtoul(msg->payload ?: "0", NULL, 0);
-	/* schedule eib write */
-	if (it->naddr && item_option(it, 't') && (
-				/* volatile message configured not to flow from MQTT to KNX */
-				(item_option(it, 'm') && item_option(it, 'v')) ||
-				/* MQTT retained msg, cache is taken from MQTT */
-				(item_option(it, 'm') && msg->retain) ||
-				/* new data in message */
-				(!item_option(it, 'v') && (!(it->flags & FL_EIB_SEEN) || (it->evalue != it->mvalue)))))
-		libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->paddr[0], it->mvalue, 0x0080));
-	it->flags |= FL_MQTT_SEEN;
+	} else if (mqtt_write_suffix && test_suffix(msg->topic, mqtt_write_suffix)) {
+		it = topictoitem(msg->topic, mqtt_write_suffix);
+		if (!it)
+			return;
+
+		if (!msg->retain && it->naddr && !item_option(it, 'r') && item_option(it, 't'))
+			/* forward non-local requests to EIB */
+			libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->paddr[0],
+						strtoul(msg->payload ?: "0", NULL, 0), 0x0080));
+
+	} else {
+		/* find entry */
+		it = topictoitem(msg->topic, NULL);
+		if (!it)
+			return;
+
+		it->mvalue = strtoul(msg->payload ?: "0", NULL, 0);
+		/* schedule eib write */
+		if (it->naddr && item_option(it, 't') && (item_option(it, 'r') || (!mqtt_write_suffix && !msg->retain)))
+			libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->paddr[0], it->mvalue, 0x0080));
+		it->flags |= FL_MQTT_SEEN;
+	}
 }
 
 /* EIB events */
@@ -417,6 +433,7 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 	const uint8_t *dat = vdat;
 	int cmd, ret, naddr, evalue;
 	struct item *it;
+	char *dsttopic;
 	static char sbuf[32*2+1];
 
 	cmd = hdr & 0x03c0;
@@ -447,16 +464,15 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 					continue;
 				mylog(LOG_INFO, "%s matches %s:%i", eibgaddrtostr(dst), it->topic, naddr);
 				/* process response */
-				if (item_option(it, 'w') &&
-						((item_option(it, 'v') && item_option(it, 'e')) ||
-						 (!item_option(it, 'v') && (!(it->flags & FL_MQTT_SEEN) || (evalue != it->mvalue))))) {
+				if (item_option(it, 'w')) {
 					/* forward volatile or new or changed entries */
-					sprintf(sbuf, "%i", it->evalue);
+					sprintf(sbuf, "%i", evalue);
 					/* push in MQTT, retain if not volatile */
-					mylog(LOG_INFO, "mqtt:>%s %s", it->topic, sbuf);
-					ret = mosquitto_publish(mosq, NULL, it->topic, strlen(sbuf), sbuf, mqtt_qos, !item_option(it, 'v'));
+					dsttopic = (item_option(it, 'r') && it->writetopic) ? it->writetopic : it->topic;
+					mylog(LOG_INFO, "mqtt:>%s %s", dsttopic, sbuf);
+					ret = mosquitto_publish(mosq, NULL, dsttopic, strlen(sbuf), sbuf, mqtt_qos, dsttopic == it->topic);
 					if (ret)
-						mylog(LOG_ERR, "mosquitto_publish %s '%s': %s", it->topic, sbuf, mosquitto_strerror(ret));
+						mylog(LOG_ERR, "mosquitto_publish %s '%s': %s", dsttopic, sbuf, mosquitto_strerror(ret));
 				}
 				/* update local cache */
 				it->evalue = evalue;
@@ -536,6 +552,9 @@ int main(int argc, char *argv[])
 	case 's':
 		eib_suffix = optarg;
 		eib_suffixlen = strlen(eib_suffix);
+		break;
+	case 'w':
+		mqtt_write_suffix = optarg;
 		break;
 	case 'f':
 		default_options = optarg;
