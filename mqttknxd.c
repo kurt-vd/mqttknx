@@ -46,11 +46,16 @@ static const char help_msg[] =
 	" -m, --mqtt=HOST[:PORT]Specify alternate MQTT host+port\n"
 	" -s, --suffix=STR	Give EIB/KNX config topic suffix (default /eib)\n"
 	" -w, --write=STR	Give MQTT topic suffix for writing the topic (default empty)\n"
-	" -f, --flags=BITFIELD	Specify default flags for EIB parameters (default 'wt')\n"
+	" -f, --flags=BITFIELD	Specify default flags for EIB parameters (default 'wt1')\n"
 	"			BITFIELD is a sequence of characters of\n"
 	"			r	Respond to EIB read requests\n"
 	"			w	Update value on EIB writes/transmits\n"
 	"			t	Transmit value to EIB on change\n"
+	"			1	1bit payloads\n"
+	"			4	4bit payloads\n"
+	"			8|1B	1byte payloads\n"
+	"			16|2B	2byte payloads\n"
+	"			32|4B	4byte payloads\n"
 	;
 
 #ifdef _GNU_SOURCE
@@ -120,6 +125,7 @@ struct item {
 	struct item *prev;
 
 	int mvalue; /* last value on MQTT */
+	int eibnbits;
 	eibaddr_t *paddr;
 	int naddr;
 	int saddr;
@@ -130,6 +136,9 @@ struct item {
 static struct item *items;
 
 static const char *eibgaddrtostr(eibaddr_t val);
+static void my_eib_write(void *dat);
+static void my_eib_response(void *dat);
+static void my_eib_request(void *dat);
 
 static inline int item_option(struct item *it, int c)
 {
@@ -161,6 +170,9 @@ static void add_item(struct item *it)
 
 static void delete_item(struct item *it)
 {
+	libt_remove_timeout(my_eib_write, it);
+	libt_remove_timeout(my_eib_response, it);
+	libt_remove_timeout(my_eib_request, it);
 	if (it->prev)
 		it->prev->next = it->next;
 	if (it->next)
@@ -258,58 +270,54 @@ static double next_eib_timeslot(void)
 	return filled_eib_slot;
 }
 
-static inline void *compose_eib_param(eibaddr_t addr, int value, uint16_t sdat)
-{
-	return (void *)(long)(addr + ((value & 0x3f) << 16) + (((uint32_t)sdat & 0xffc0) << 16));
-}
-
 static const char *eibactions[16] = {
 	[0] = "req",
 	[1] = "resp",
 	[2] = "write",
 };
-static void my_eib_send(void *dat)
-{
-	uint16_t sdat;
-	uint8_t pkt[2];
-	eibaddr_t dst;
-	int value;
-	const char *eibaction;
 
-	dst = (long)dat & 0xffff;
-	sdat = (long)dat >> 16;
-	eibaction = eibactions[sdat >> 6] ?: "?";
-	value = sdat & 0x3f;
+static void my_eib_send(eibaddr_t dst, uint16_t sdat, int value, int nbits)
+{
+	const char *eibaction;
+	int j;
+	uint8_t pkt[10];
+
+	eibaction = (eibactions[(sdat >> 6) & 0xf]) ?: "?";
 
 	pkt[0] = sdat >> 8;
 	pkt[1] = sdat;
+	if (nbits <= 6)
+		pkt[1] |= value & 0x3f;
+	else for (j = nbits/8; j; --j, value >>= 8)
+		pkt[2+j-1] = value & 0xff;
+
 	mylog(LOG_INFO, "eib:>%s %s %i\n", eibaction, eibgaddrtostr(dst), value);
-	if (EIBSendGroup(eib, dst, sizeof(pkt), pkt) < 0)
-		mylog(LOG_ERR, "EIB: %s %s %i failed", eibaction, eibgaddrtostr(dst), value);
+	if (EIBSendGroup(eib, dst, 2+nbits/8, pkt) < 0)
+		mylog(LOG_ERR, "eib: %s %s %i failed", eibaction, eibgaddrtostr(dst), value);
 }
 
-static void my_mqtt_clear_cache(void *dat)
+static void my_eib_write(void *dat)
 {
-	eibaddr_t dst = (long)dat & 0xffff;
-	struct item *it;
+	struct item *it = dat;
 
-	for (it = items; it; it = it->next) {
-		if (!it->naddr || it->paddr[0] != dst)
-			continue;
-		mylog(LOG_INFO, "mqtt:clear %s\n", it->topic);
-		/* try to publish an empty message.
-		 * This clear the MQTT cache.
-		 * The result is ignored here
-		 * RETAIN is always set, and effectively clears the retained cache
-		 */
-		mosquitto_publish(mosq, NULL, it->topic, 0, NULL, mqtt_qos, 1);
-	}
+	if (it->naddr)
+		my_eib_send(it->paddr[0], 0x0080, it->mvalue, it->eibnbits);
 }
 
-static void my_eib_send_or_clear_cache(void *dat)
+static void my_eib_response(void *dat)
 {
-	my_eib_send(dat);
-	libt_add_timeout(1, my_mqtt_clear_cache, dat);
+	struct item *it = dat;
+
+	if (it->naddr)
+		my_eib_send(it->paddr[0], 0x0040, it->mvalue, it->eibnbits);
+}
+
+static void my_eib_request(void *dat)
+{
+	struct item *it = dat;
+
+	if (it->naddr)
+		my_eib_send(it->paddr[0], 0x0000, 0, 0);
 }
 
 static int test_suffix(const char *topic, const char *suffix)
@@ -370,29 +378,37 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		if (!it->naddr)
 			mylog(LOG_WARNING, "%s: configured without EIB/KNX addr!", it->topic);
 
-		str = strtok(NULL, " \t");
 		/* parse flags */
 		if (it->options)
 			free(it->options);
-		it->options = strcmp(str ?: "*", "*") ? strdup(str) : NULL;
+		it->options = strtok(NULL, " \t");
+		if (it->options)
+			it->options = strdup(it->options);
+
+		/* determine eib payload size */
+		it->eibnbits = strtoul(strpbrk(it->options ?: "", "0123456789") ?: "1", &str, 10);
+		if (str && *str == 'B')
+			it->eibnbits *= 8;
 
 		/* refresh cache */
-		if (it->naddr && !item_option(it, 'r') && item_option(it, 'w'))
+		if (it->naddr && !item_option(it, 'r') && item_option(it, 'w') && item_option(it, 't'))
 			/* schedule eib request */
-			libt_add_timeouta(next_eib_timeslot(), my_eib_send_or_clear_cache, compose_eib_param(it->paddr[0], 0, 0x0000));
+			libt_add_timeouta(next_eib_timeslot(), my_eib_request, it);
 		if (it->naddr && item_option(it, 't') && item_option(it, 'r'))
 			/* propagate MQTT cached value to EIB */
-			libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->paddr[0], it->mvalue, 0x0080));
+			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 
 	} else if (mqtt_write_suffix && test_suffix(msg->topic, mqtt_write_suffix)) {
 		it = topictoitem(msg->topic, mqtt_write_suffix);
 		if (!it)
 			return;
 
-		if (!msg->retain && it->naddr && !item_option(it, 'r') && item_option(it, 't'))
+		if (!msg->retain && it->naddr && !item_option(it, 'r') && item_option(it, 't')) {
+			/* only assign mvalue when about to transmit */
+			it->mvalue = strtoul(msg->payload ?: "0", NULL, 0);
 			/* forward non-local requests to EIB */
-			libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->paddr[0],
-						strtoul(msg->payload ?: "0", NULL, 0), 0x0080));
+			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
+		}
 
 	} else {
 		/* find entry */
@@ -403,7 +419,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		it->mvalue = strtoul(msg->payload ?: "0", NULL, 0);
 		/* schedule eib write */
 		if (it->naddr && item_option(it, 't') && (item_option(it, 'r') || (!mqtt_write_suffix && !msg->retain)))
-			libt_add_timeouta(next_eib_timeslot(), my_eib_send, compose_eib_param(it->paddr[0], it->mvalue, 0x0080));
+			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 	}
 }
 
@@ -438,8 +454,7 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 				continue;
 			for (naddr = 0; naddr < it->naddr; ++naddr) {
 				if (it->paddr[naddr] == dst) {
-					libt_add_timeouta(next_eib_timeslot(), my_eib_send,
-							compose_eib_param(it->paddr[0], it->mvalue, 0x0040));
+					libt_add_timeouta(next_eib_timeslot(), my_eib_response, it);
 					break;
 				}
 			}
@@ -448,10 +463,12 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 	case 0x0040:
 	case 0x0080:
 		evalue = eib_value(hdr, dat, len);
-		libt_remove_timeout(my_mqtt_clear_cache, compose_eib_param(dst, 0, 0x0000));
-		libt_remove_timeout(my_eib_send_or_clear_cache, compose_eib_param(dst, 0, 0x0000));
 		mylog(LOG_INFO, "eib:<%s %s %i", eibactions[cmd >> 6] ?: "?", eibgaddrtostr(dst), evalue);
 		for (it = items; it; it = it->next) {
+			if (it->naddr && it->paddr[0] == dst)
+				/* remove pending request for this item */
+				libt_remove_timeout(my_eib_request, it);
+
 			for (naddr = 0; naddr < it->naddr; ++naddr) {
 				if (it->paddr[naddr] != dst)
 					continue;
