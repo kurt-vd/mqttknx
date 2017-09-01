@@ -109,7 +109,6 @@ static int mqtt_keepalive = 10;
 static int mqtt_qos = 2;
 static const char *mqtt_write_suffix;
 static char *eib_suffix = "/eib";
-static int eib_suffixlen = 4;
 static char *default_options = "wt";
 
 /* EIB parameters */
@@ -156,18 +155,6 @@ static void item_add_addr(struct item *it, eibaddr_t addr)
 	it->paddr[it->naddr++] = addr;
 }
 
-static void add_item(struct item *it)
-{
-	/* insert in linked list */
-	it->next = items;
-	if (it->next) {
-		it->prev = it->next->prev;
-		it->next->prev = it;
-	} else
-		it->prev = (struct item *)(((char *)&items) - offsetof(struct item, next));
-	it->prev->next = it;
-}
-
 static void delete_item(struct item *it)
 {
 	libt_remove_timeout(my_eib_write, it);
@@ -185,7 +172,7 @@ static void delete_item(struct item *it)
 	free(it);
 }
 
-static struct item *topictoitem(const char *topic, const char *suffix)
+static struct item *topictoitem(const char *topic, const char *suffix, int create)
 {
 	struct item *it;
 	int len, slen;
@@ -197,7 +184,25 @@ static struct item *topictoitem(const char *topic, const char *suffix)
 		if (!strncmp(it->topic, topic, len - slen) && !it->topic[len])
 			return it;
 	}
-	return NULL;
+	if (!create)
+		return NULL;
+
+	it = malloc(sizeof(*it));
+	memset(it, 0, sizeof(*it));
+	it->topic = strdup(topic);
+	it->topic[len-slen] = 0;
+	if (mqtt_write_suffix)
+		asprintf(&it->writetopic, "%s%s", it->topic, mqtt_write_suffix);
+
+	/* insert in linked list */
+	it->next = items;
+	if (it->next) {
+		it->prev = it->next->prev;
+		it->next->prev = it;
+	} else
+		it->prev = (struct item *)(((char *)&items) - offsetof(struct item, next));
+	it->prev->next = it;
+	return it;
 }
 
 /* tools */
@@ -342,22 +347,11 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		char *str;
 		eibaddr_t addr;
 
-		it = topictoitem(msg->topic, eib_suffix);
-
-		if (!msg->payload) {
+		it = topictoitem(msg->topic, eib_suffix, msg->payloadlen);
+		if (!it || !msg->payloadlen) {
 			if (it)
 				delete_item(it);
 			return;
-		}
-		/* flush info */
-		if (!it) {
-			it = malloc(sizeof(*it));
-			memset(it, 0, sizeof(*it));
-			it->topic = strdup(msg->topic);
-			it->topic[strlen(it->topic) - eib_suffixlen] = 0;
-			if (mqtt_write_suffix)
-				asprintf(&it->writetopic, "%s%s", it->topic, mqtt_write_suffix);
-			add_item(it);
 		}
 		/* parse eibaddr */
 		it->naddr = 0;
@@ -399,7 +393,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 
 	} else if (mqtt_write_suffix && test_suffix(msg->topic, mqtt_write_suffix)) {
-		it = topictoitem(msg->topic, mqtt_write_suffix);
+		it = topictoitem(msg->topic, mqtt_write_suffix, 0);
 		if (!it)
 			return;
 
@@ -412,7 +406,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 
 	} else {
 		/* find entry */
-		it = topictoitem(msg->topic, NULL);
+		it = topictoitem(msg->topic, NULL, 0);
 		if (!it)
 			return;
 
@@ -558,7 +552,6 @@ int main(int argc, char *argv[])
 		break;
 	case 's':
 		eib_suffix = optarg;
-		eib_suffixlen = strlen(eib_suffix);
 		break;
 	case 'w':
 		mqtt_write_suffix = optarg;
