@@ -9,6 +9,7 @@
 
 #include <unistd.h>
 #include <getopt.h>
+#include <fnmatch.h>
 #include <poll.h>
 #include <syslog.h>
 #include <mosquitto.h>
@@ -45,6 +46,7 @@ static const char help_msg[] =
 	"			Like ip:xxx or usb: or ...\n"
 	" -m, --mqtt=HOST[:PORT]Specify alternate MQTT host+port\n"
 	" -s, --suffix=STR	Give EIB/KNX config topic suffix (default /eib)\n"
+	" -S, --evsuffix=STR	Give EIB/KNX event config topic suffix (default /eibevent)\n"
 	" -w, --write=STR	Give MQTT topic suffix for writing the topic (default empty)\n"
 	" -f, --flags=BITFIELD	Specify default flags for EIB parameters (default 'wt1')\n"
 	"			BITFIELD is a sequence of characters of\n"
@@ -68,6 +70,7 @@ static struct option long_opts[] = {
 	{ "eib", required_argument, NULL, 'e', },
 	{ "mqtt", required_argument, NULL, 'm', },
 	{ "suffix", required_argument, NULL, 's', },
+	{ "evsuffix", required_argument, NULL, 'S', },
 	{ "write", required_argument, NULL, 'w', },
 
 	{ },
@@ -76,7 +79,7 @@ static struct option long_opts[] = {
 #define getopt_long(argc, argv, optstring, longopts, longindex) \
 	getopt((argc), (argv), (optstring))
 #endif
-static const char optstring[] = "Vv?f:e:m:s:w:";
+static const char optstring[] = "Vv?f:e:m:s:S:w:";
 
 /* signal handler */
 static volatile int sigterm;
@@ -109,6 +112,7 @@ static int mqtt_keepalive = 10;
 static int mqtt_qos = 2;
 static const char *mqtt_write_suffix;
 static char *eib_suffix = "/eib";
+static char *eibev_suffix = "/eibevent";
 static char *default_options = "wt";
 
 /* EIB parameters */
@@ -133,6 +137,15 @@ struct item {
 	char *writetopic;
 };
 static struct item *items;
+
+struct event {
+	struct event *next;
+	struct event *prev;
+
+	char *topic;
+	char *pattern;
+};
+static struct event *events;
 
 static const char *eibgaddrtostr(eibaddr_t val);
 static void my_eib_write(void *dat);
@@ -205,7 +218,56 @@ static struct item *topictoitem(const char *topic, const char *suffix, int creat
 	return it;
 }
 
+static struct event *topictoevent(const char *topic, const char *suffix, int create)
+{
+	struct event *ev;
+	int len, slen;
+
+	len = strlen(topic);
+	slen = strlen(suffix ?: "");
+	for (ev = events; ev; ev = ev->next) {
+		if (!strncmp(ev->topic, topic, len - slen) && !ev->topic[len])
+			return ev;
+	}
+
+	if (!create)
+		return NULL;
+	ev = malloc(sizeof(*ev));
+	memset(ev, 0, sizeof(*ev));
+	ev->topic = strdup(topic);
+	ev->topic[len-slen] = 0;
+
+	/* insert in linked list */
+	ev->next = events;
+	if (ev->next) {
+		ev->prev = ev->next->prev;
+		ev->next->prev = ev;
+	} else
+		ev->prev = (struct event *)(((char *)&events) - offsetof(struct event, next));
+	ev->prev->next = ev;
+	return ev;
+}
+
+static void delete_event(struct event *ev)
+{
+	if (ev->prev)
+		ev->prev->next = ev->next;
+	if (ev->next)
+		ev->next->prev = ev->prev;
+	free(ev->topic);
+	if (ev->pattern)
+		free(ev->pattern);
+	free(ev);
+}
+
 /* tools */
+static const char *eibphaddrtostr(eibaddr_t val)
+{
+	static char buf[16];
+
+	sprintf(buf, "%i.%i.%i", (val >> 12) & 0x0f, (val >> 8) & 0x0f, val & 0xff);
+	return buf;
+}
 static const char *eibgaddrtostr(eibaddr_t val)
 {
 	static char buf[16];
@@ -339,6 +401,7 @@ static int test_suffix(const char *topic, const char *suffix)
 static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitto_message *msg)
 {
 	struct item *it;
+	struct event *ev;
 	char *endp;
 
 	mylog(LOG_INFO, "mqtt:<%s %s", msg->topic, (char *)msg->payload ?: "<null>");
@@ -392,6 +455,17 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			/* propagate MQTT cached value to EIB */
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 
+	} else if (test_suffix(msg->topic, eibev_suffix)) {
+		ev = topictoevent(msg->topic, eibev_suffix, msg->payloadlen);
+		if (!ev || !msg->payloadlen) {
+			if (ev)
+				delete_event(ev);
+			return;
+		}
+		if (ev->pattern)
+			free(ev->pattern);
+		ev->pattern = strdup(msg->payload);
+
 	} else if (mqtt_write_suffix && test_suffix(msg->topic, mqtt_write_suffix)) {
 		it = topictoitem(msg->topic, mqtt_write_suffix, 0);
 		if (!it)
@@ -436,8 +510,9 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 	const uint8_t *dat = vdat;
 	int cmd, ret, naddr, evalue;
 	struct item *it;
+	struct event *ev;
 	char *dsttopic;
-	static char sbuf[32*2+1];
+	static char sbuf[128];
 
 	cmd = hdr & 0x03c0;
 	switch (cmd) {
@@ -480,6 +555,17 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 				}
 			}
 		}
+		if (cmd != 0x0080)
+			return;
+		/* emit events for matched patterns */
+		sprintf(sbuf, "%s,%s,%i", eibphaddrtostr(src), eibgaddrtostr(dst), evalue);
+		for (ev = events; ev; ev = ev->next) {
+			if (fnmatch(ev->pattern, sbuf, 0))
+				continue;
+			ret = mosquitto_publish(mosq, NULL, ev->topic, strlen(sbuf), sbuf, mqtt_qos, 0);
+			if (ret)
+				mylog(LOG_ERR, "mosquitto_publish %s '%s': %s", ev->topic, sbuf, mosquitto_strerror(ret));
+		}
 		break;
 	default:
 		mylog(LOG_INFO, "eib:<%03x %s", cmd, eibgaddrtostr(dst));
@@ -498,8 +584,8 @@ static void my_exit(void)
 
 static void test_config_seen(void *dat)
 {
-	if (!items)
-		mylog(LOG_WARNING, "no items have been configured, it seems");
+	if (!items && !events)
+		mylog(LOG_WARNING, "no items or events have been configured, it seems");
 }
 
 int main(int argc, char *argv[])
@@ -552,6 +638,9 @@ int main(int argc, char *argv[])
 		break;
 	case 's':
 		eib_suffix = optarg;
+		break;
+	case 'S':
+		eibev_suffix = optarg;
 		break;
 	case 'w':
 		mqtt_write_suffix = optarg;

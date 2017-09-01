@@ -15,6 +15,7 @@ Run these commands (or start with your init system).
 * home/kitchen/eib	__x/y/z[,x/y/z...][ rwt]__	Linked EIB group addresses, with 'r', 'w' and 't' flags
 * home/hall		__0|1__		Hall light
 * home/hall/eib		__x/y/z__	Linked EIBgroup address.
+* event/hall1pressed	__a.b.c,x/y/z,1__	will alert when a.b.c writes 1 to x/y/x, usefull to trigger special actions
 * ...
 
 # other tools
