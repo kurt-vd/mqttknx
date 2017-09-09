@@ -128,6 +128,13 @@ struct item {
 	struct item *prev;
 
 	int mvalue; /* last value on MQTT */
+	int mtvalue; /* my last sent value on MQTT */
+	int evalue; /* last value on EIB */
+	int etvalue; /* my last sent value on EIB */
+	int eqvalue; /* queued value for EIB write */
+	int flags;
+#define MQTT_PUBLISHED	(1 << 0)
+#define EIB_PUBLISHED	(1 << 1)
 	int eibnbits;
 	eibaddr_t *paddr;
 	int naddr;
@@ -367,8 +374,11 @@ static void my_eib_write(void *dat)
 {
 	struct item *it = dat;
 
-	if (it->naddr)
-		my_eib_send(it->paddr[0], 0x0080, it->mvalue, it->eibnbits);
+	if (it->naddr) {
+		my_eib_send(it->paddr[0], 0x0080, it->eqvalue, it->eibnbits);
+		it->etvalue = it->eqvalue;
+		it->flags |= EIB_PUBLISHED;
+	}
 }
 
 static void my_eib_response(void *dat)
@@ -451,9 +461,13 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		if (it->naddr && !item_option(it, 'r') && item_option(it, 'w') && item_option(it, 't'))
 			/* schedule eib request */
 			libt_add_timeouta(next_eib_timeslot(), my_eib_request, it);
-		if (it->naddr && item_option(it, 't') && item_option(it, 'r'))
+		if (it->naddr && item_option(it, 't') && item_option(it, 'r')) {
 			/* propagate MQTT cached value to EIB */
+			it->eqvalue = it->mvalue;
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
+		}
+		/* clear flags that may be wrong due to a changed addr */
+		it->flags &= ~EIB_PUBLISHED;
 
 	} else if (test_suffix(msg->topic, eibev_suffix)) {
 		ev = topictoevent(msg->topic, eibev_suffix, msg->payloadlen);
@@ -475,6 +489,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			/* only assign mvalue when about to transmit */
 			it->mvalue = strtoul(msg->payload ?: "0", NULL, 0);
 			/* forward non-local requests to EIB */
+			it->eqvalue = it->mvalue;
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 		}
 
@@ -485,9 +500,16 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			return;
 
 		it->mvalue = strtoul(msg->payload ?: "0", NULL, 0);
+		if (!mqtt_write_suffix && it->mtvalue == it->mvalue && (it->flags & MQTT_PUBLISHED)) {
+			/* avoid loops here, drop my echo */
+			it->flags &= ~MQTT_PUBLISHED;
+			return;
+		}
 		/* schedule eib write */
-		if (it->naddr && item_option(it, 't') && (item_option(it, 'r') || (!mqtt_write_suffix && !msg->retain)))
+		if (it->naddr && item_option(it, 't') && (item_option(it, 'r') || (!mqtt_write_suffix && !msg->retain))) {
+			it->eqvalue = it->mvalue;
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
+		}
 	}
 }
 
@@ -541,7 +563,13 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 			for (naddr = 0; naddr < it->naddr; ++naddr) {
 				if (it->paddr[naddr] != dst)
 					continue;
+				it->evalue = evalue;
 				mylog(LOG_INFO, "%s matches %s:%i", eibgaddrtostr(dst), it->topic, naddr);
+				if (it->eqvalue == evalue && (it->flags & EIB_PUBLISHED)) {
+					/* avoid loops here, drop my echo */
+					it->flags &= ~EIB_PUBLISHED;
+					break;
+				}
 				/* process response */
 				if (item_option(it, 'w')) {
 					/* forward volatile or new or changed entries */
@@ -552,6 +580,10 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 					ret = mosquitto_publish(mosq, NULL, dsttopic, strlen(sbuf), sbuf, mqtt_qos, dsttopic == it->topic);
 					if (ret)
 						mylog(LOG_ERR, "mosquitto_publish %s '%s': %s", dsttopic, sbuf, mosquitto_strerror(ret));
+					else {
+						it->flags |= MQTT_PUBLISHED;
+						it->mtvalue = evalue;
+					}
 				}
 			}
 		}
