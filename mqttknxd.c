@@ -565,7 +565,7 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 					continue;
 				it->evalue = evalue;
 				mylog(LOG_INFO, "%s matches %s:%i", eibgaddrtostr(dst), it->topic, naddr);
-				if (it->eqvalue == evalue && (it->flags & EIB_PUBLISHED)) {
+				if (it->etvalue == evalue && (it->flags & EIB_PUBLISHED)) {
 					/* avoid loops here, drop my echo */
 					it->flags &= ~EIB_PUBLISHED;
 					break;
