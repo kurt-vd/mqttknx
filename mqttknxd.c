@@ -164,6 +164,15 @@ static inline int item_option(struct item *it, int c)
 	return !!strchr(it->options ?: default_options, c);
 }
 
+static inline int mqtt_owned(struct item *it)
+{
+	return item_option(it, 'r');
+}
+static inline int eib_owned(struct item *it)
+{
+	return !mqtt_owned(it);
+}
+
 static void item_add_addr(struct item *it, eibaddr_t addr)
 {
 	if (it->naddr >= it->saddr) {
@@ -458,7 +467,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			it->eibnbits *= 8;
 
 		/* refresh cache */
-		if (it->naddr && !item_option(it, 'r') && item_option(it, 'w') && item_option(it, 't'))
+		if (it->naddr && !item_option(it, 'r') && item_option(it, 'w'))
 			/* schedule eib request */
 			libt_add_timeouta(next_eib_timeslot(), my_eib_request, it);
 		if (it->naddr && item_option(it, 't') && item_option(it, 'r')) {
@@ -481,11 +490,13 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		ev->pattern = strdup(msg->payload);
 
 	} else if (mqtt_write_suffix && test_suffix(msg->topic, mqtt_write_suffix)) {
+		if (msg->retain)
+			/* ignore retained request */
+			return;
 		it = topictoitem(msg->topic, mqtt_write_suffix, 0);
 		if (!it)
 			return;
-
-		if (!msg->retain && it->naddr && !item_option(it, 'r') && item_option(it, 't')) {
+		if (it->naddr && eib_owned(it)) {
 			/* only assign mvalue when about to transmit */
 			it->mvalue = strtoul(msg->payload ?: "0", NULL, 0);
 			/* forward non-local requests to EIB */
@@ -500,13 +511,19 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			return;
 
 		it->mvalue = strtoul(msg->payload ?: "0", NULL, 0);
-		if (!mqtt_write_suffix && it->mtvalue == it->mvalue && (it->flags & MQTT_PUBLISHED)) {
-			/* avoid loops here, drop my echo */
+		if (!msg->retain && it->mtvalue == it->mvalue && (it->flags & MQTT_PUBLISHED)) {
 			it->flags &= ~MQTT_PUBLISHED;
+			/* avoid loops here, drop my echo */
 			return;
 		}
+
+		if (eib_owned(it) && (it->writetopic || msg->retain))
+			/* ignore values for EIB items when expecting requests */
+			/* ignore retained values for EIB items */
+			return;
+
 		/* schedule eib write */
-		if (it->naddr && item_option(it, 't') && (item_option(it, 'r') || (!mqtt_write_suffix && !msg->retain))) {
+		if (it->naddr && item_option(it, 't')) {
 			it->eqvalue = it->mvalue;
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 		}
@@ -541,7 +558,8 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 	case 0x0000:
 		mylog(LOG_INFO, "eib:<%s %s", eibactions[cmd >> 6] ?: "?", eibgaddrtostr(dst));
 		for (it = items; it; it = it->next) {
-			if (!item_option(it, 'r'))
+			if (eib_owned(it))
+				/* we provide no response for */
 				continue;
 			for (naddr = 0; naddr < it->naddr; ++naddr) {
 				if (it->paddr[naddr] == dst) {
@@ -565,17 +583,18 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 					continue;
 				it->evalue = evalue;
 				mylog(LOG_INFO, "%s matches %s:%i", eibgaddrtostr(dst), it->topic, naddr);
-				if (it->etvalue == evalue && (it->flags & EIB_PUBLISHED)) {
-					/* avoid loops here, drop my echo */
+				if (it->etvalue == evalue && (it->flags & EIB_PUBLISHED) && naddr == 0) {
 					it->flags &= ~EIB_PUBLISHED;
-					break;
+					if (!it->writetopic || mqtt_owned(it))
+						/* avoid loops here, drop my echo */
+						break;
 				}
 				/* process response */
 				if (item_option(it, 'w')) {
 					/* forward volatile or new or changed entries */
 					sprintf(sbuf, "%i", evalue);
 					/* push in MQTT, retain if not volatile */
-					dsttopic = (item_option(it, 'r') && it->writetopic) ? it->writetopic : it->topic;
+					dsttopic = (mqtt_owned(it) && it->writetopic) ? it->writetopic : it->topic;
 					mylog(LOG_INFO, "mqtt:>%s %s", dsttopic, sbuf);
 					ret = mosquitto_publish(mosq, NULL, dsttopic, strlen(sbuf), sbuf, mqtt_qos, dsttopic == it->topic);
 					if (ret)
