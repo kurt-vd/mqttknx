@@ -47,7 +47,7 @@ static const char help_msg[] =
 	" -m, --mqtt=HOST[:PORT]Specify alternate MQTT host+port\n"
 	" -s, --suffix=STR	Give EIB/KNX config topic suffix (default /eib)\n"
 	" -S, --evsuffix=STR	Give EIB/KNX event config topic suffix (default /eibevent)\n"
-	" -w, --write=STR	Give MQTT topic suffix for writing the topic (default empty)\n"
+	" -w, --write=STR	Give MQTT topic suffix for writing the topic (default /set)\n"
 	" -f, --flags=BITFIELD	Specify default flags for EIB parameters (default 'wt1')\n"
 	"			BITFIELD is a sequence of characters of\n"
 	"			r	Respond to EIB read requests\n"
@@ -110,7 +110,7 @@ static const char *mqtt_host = "localhost";
 static int mqtt_port = 1883;
 static int mqtt_keepalive = 10;
 static int mqtt_qos = 2;
-static const char *mqtt_write_suffix;
+static const char *mqtt_write_suffix = "/set";
 static char *eib_suffix = "/eib";
 static char *eibev_suffix = "/eibevent";
 static char *default_options = "wt";
@@ -695,6 +695,8 @@ int main(int argc, char *argv[])
 		break;
 	case 'w':
 		mqtt_write_suffix = optarg;
+		if (!*mqtt_write_suffix)
+			mqtt_write_suffix = NULL;
 		break;
 	case 'f':
 		default_options = optarg;
