@@ -141,6 +141,7 @@ struct item {
 	int saddr;
 	char *options;
 	char *topic;
+	int topiclen;
 	char *writetopic;
 };
 static struct item *items;
@@ -204,13 +205,17 @@ static void delete_item(struct item *it)
 static struct item *topictoitem(const char *topic, const char *suffix, int create)
 {
 	struct item *it;
-	int len, slen;
+	int len;
 
-	len = strlen(topic);
-	slen = strlen(suffix ?: "");
-
+	len = strlen(topic ?: "") - strlen(suffix ?: "");
+	if (len < 0)
+		return NULL;
+	/* match suffix */
+	if (strcmp(topic+len, suffix ?: ""))
+		return NULL;
+	/* match base topic */
 	for (it = items; it; it = it->next) {
-		if (!strncmp(it->topic, topic, len - slen) && !it->topic[len])
+		if ((it->topiclen == len) && !strncmp(it->topic ?: "", topic, len))
 			return it;
 	}
 	if (!create)
@@ -219,7 +224,8 @@ static struct item *topictoitem(const char *topic, const char *suffix, int creat
 	it = malloc(sizeof(*it));
 	memset(it, 0, sizeof(*it));
 	it->topic = strdup(topic);
-	it->topic[len-slen] = 0;
+	it->topic[len] = 0;
+	it->topiclen = len;
 	if (mqtt_write_suffix)
 		asprintf(&it->writetopic, "%s%s", it->topic, mqtt_write_suffix);
 
