@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <math.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -105,6 +106,36 @@ static const char *csprintf(const char *fmt, ...)
 	return str;
 }
 
+/* return string with trailing decimal 0's stripped */
+__attribute__((unused))
+static const char *mydtostr(double d)
+{
+	static char buf[64];
+	char *str;
+	int ptpresent = 0;
+
+	sprintf(buf, "%lg", d);
+	for (str = buf; *str; ++str) {
+		if (*str == '.')
+			ptpresent = 1;
+		else if (*str == 'e')
+			/* nothing to do anymore */
+			break;
+		else if (ptpresent && *str == '0') {
+			int len = strspn(str, "0");
+			if (!str[len]) {
+				/* entire string (after .) is '0' */
+				*str = 0;
+				if (str > buf && *(str-1) == '.')
+					/* remote '.' too */
+					*(str-1) = 0;
+				break;
+			}
+		}
+	}
+	return buf;
+}
+
 /* MQTT parameters */
 static const char *mqtt_host = "localhost";
 static int mqtt_port = 1883;
@@ -127,11 +158,12 @@ struct item {
 	struct item *next;
 	struct item *prev;
 
-	int mvalue; /* last value on MQTT */
-	int mtvalue; /* my last sent value on MQTT */
+	double mvalue; /* last value on MQTT */
+	double mtvalue; /* my last sent value on MQTT */
 	int evalue; /* last value on EIB */
 	int etvalue; /* my last sent value on EIB */
 	int eqvalue; /* queued value for EIB write */
+	double mul, off; /* multiplier & offset from MQTT values */
 	int flags;
 #define MQTT_PUBLISHED	(1 << 0)
 #define EIB_PUBLISHED	(1 << 1)
@@ -159,6 +191,19 @@ static const char *eibgaddrtostr(eibaddr_t val);
 static void my_eib_write(void *dat);
 static void my_eib_response(void *dat);
 static void my_eib_request(void *dat);
+
+static inline int mqtttoeib(double value, struct item *it)
+{
+	return (value*it->mul)+it->off;
+}
+static inline double eibtomqtt(int value, struct item *it)
+{
+	return (value-it->off)/it->mul;
+}
+static inline int dbleq(double a, double b)
+{
+	return fabs((a-b)/(a+b)/2) < 1e-3;
+}
 
 static inline int item_option(struct item *it, int c)
 {
@@ -223,6 +268,8 @@ static struct item *topictoitem(const char *topic, const char *suffix, int creat
 
 	it = malloc(sizeof(*it));
 	memset(it, 0, sizeof(*it));
+	it->mul = 1;
+	it->off = 0;
 	it->topic = strdup(topic);
 	it->topic[len] = 0;
 	it->topiclen = len;
@@ -401,7 +448,7 @@ static void my_eib_response(void *dat)
 	struct item *it = dat;
 
 	if (it->naddr)
-		my_eib_send(it->paddr[0], 0x0040, it->mvalue, it->eibnbits);
+		my_eib_send(it->paddr[0], 0x0040, mqtttoeib(it->mvalue, it), it->eibnbits);
 }
 
 static void my_eib_request(void *dat)
@@ -432,7 +479,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 	mylog(LOG_INFO, "mqtt:<%s %s", msg->topic, (char *)msg->payload ?: "<null>");
 	if (test_suffix(msg->topic, eib_suffix)) {
 		/* this is an EIB config parameter */
-		char *str;
+		char *str, *tok;
 		eibaddr_t addr;
 
 		it = topictoitem(msg->topic, eib_suffix, msg->payloadlen);
@@ -467,6 +514,20 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		if (it->options)
 			it->options = strdup(it->options);
 
+		for (tok = strtok(NULL, " \t"); tok; tok = strtok(NULL, " \t")) {
+			str = strchr(tok, '=');
+			if (str)
+				*str++ = 0;
+			if (!strcmp(tok, "mul"))
+				it->mul = strtod(str, NULL);
+			else if (!strcmp(tok, "div"))
+				it->mul = 1/strtod(str, NULL);
+			else if (!strcmp(tok, "offset"))
+				it->off = strtod(str, NULL);
+			else
+				mylog(LOG_WARNING, "%s: unknown option %s", it->topic, tok);
+		}
+
 		/* determine eib payload size */
 		it->eibnbits = strtoul(strpbrk(it->options ?: "", "0123456789") ?: "1", &str, 10);
 		if (str && *str == 'B')
@@ -478,7 +539,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			libt_add_timeouta(next_eib_timeslot(), my_eib_request, it);
 		if (it->naddr && item_option(it, 't') && item_option(it, 'r')) {
 			/* propagate MQTT cached value to EIB */
-			it->eqvalue = it->mvalue;
+			it->eqvalue = mqtttoeib(it->mvalue, it);
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 		}
 		/* clear flags that may be wrong due to a changed addr */
@@ -504,9 +565,9 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			return;
 		if (it->naddr && eib_owned(it)) {
 			/* only assign mvalue when about to transmit */
-			it->mvalue = strtoul(msg->payload ?: "0", NULL, 0);
+			it->mvalue = strtod(msg->payload ?: "0", NULL);
 			/* forward non-local requests to EIB */
-			it->eqvalue = it->mvalue;
+			it->eqvalue = mqtttoeib(it->mvalue, it);
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 		}
 
@@ -516,8 +577,8 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		if (!it)
 			return;
 
-		it->mvalue = strtoul(msg->payload ?: "0", NULL, 0);
-		if (!msg->retain && it->mtvalue == it->mvalue && (it->flags & MQTT_PUBLISHED)) {
+		it->mvalue = strtod(msg->payload ?: "0", NULL);
+		if (!msg->retain && dbleq(it->mtvalue, it->mvalue) && (it->flags & MQTT_PUBLISHED)) {
 			it->flags &= ~MQTT_PUBLISHED;
 			/* avoid loops here, drop my echo */
 			return;
@@ -530,7 +591,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 
 		/* schedule eib write */
 		if (it->naddr && item_option(it, 't')) {
-			it->eqvalue = it->mvalue;
+			it->eqvalue = mqtttoeib(it->mvalue, it);
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 		}
 	}
@@ -597,17 +658,18 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 				}
 				/* process response */
 				if (item_option(it, 'w')) {
+					double devalue = eibtomqtt(evalue, it);
 					/* forward volatile or new or changed entries */
-					sprintf(sbuf, "%i", evalue);
+					const char *vstr = mydtostr(devalue);
 					/* push in MQTT, retain if not volatile */
 					dsttopic = (mqtt_owned(it) && it->writetopic) ? it->writetopic : it->topic;
-					mylog(LOG_INFO, "mqtt:>%s %s", dsttopic, sbuf);
-					ret = mosquitto_publish(mosq, NULL, dsttopic, strlen(sbuf), sbuf, mqtt_qos, dsttopic == it->topic);
+					mylog(LOG_INFO, "mqtt:>%s %s", dsttopic, vstr);
+					ret = mosquitto_publish(mosq, NULL, dsttopic, strlen(vstr), vstr, mqtt_qos, dsttopic == it->topic);
 					if (ret)
-						mylog(LOG_ERR, "mosquitto_publish %s '%s': %s", dsttopic, sbuf, mosquitto_strerror(ret));
+						mylog(LOG_ERR, "mosquitto_publish %s '%s': %s", dsttopic, vstr, mosquitto_strerror(ret));
 					else {
 						it->flags |= MQTT_PUBLISHED;
-						it->mtvalue = evalue;
+						it->mtvalue = devalue;
 					}
 				}
 			}
