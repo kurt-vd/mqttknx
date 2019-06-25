@@ -200,9 +200,24 @@ static inline double eibtomqtt(int value, struct item *it)
 {
 	return (value-it->off)/it->mul;
 }
-static inline int dbleq(double a, double b)
+static inline int dblcmp(double a, double b, double diff)
 {
-	return fabs((a-b)/(a+b)/2) < 1e-3;
+	if (isnan(a) && isnan(b))
+		return 0;
+	else if (isnan(a))
+	       return -1;
+	else if (isnan(b))
+	       return 1;
+
+	else if (fpclassify(a) == FP_ZERO && fpclassify(b) == FP_ZERO)
+		/* avoid /0 */
+		return 0;
+	else if (fabs(2*(a-b)/(a+b)) < diff)
+		return 0;
+	else if (a < b)
+		return -1;
+	else
+		return 1;
 }
 
 static inline int item_option(struct item *it, int c)
@@ -578,7 +593,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			return;
 
 		it->mvalue = strtod(msg->payload ?: "0", NULL);
-		if (!msg->retain && dbleq(it->mtvalue, it->mvalue) && (it->flags & MQTT_PUBLISHED)) {
+		if (!msg->retain && !dblcmp(it->mtvalue, it->mvalue, 1e-3) && (it->flags & MQTT_PUBLISHED)) {
 			it->flags &= ~MQTT_PUBLISHED;
 			/* avoid loops here, drop my echo */
 			return;
