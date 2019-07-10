@@ -194,7 +194,7 @@ static void my_eib_request(void *dat);
 
 static inline int mqtttoeib(double value, struct item *it)
 {
-	return (value*it->mul)+it->off;
+	return lround((value*it->mul)+it->off);
 }
 static inline double eibtomqtt(int value, struct item *it)
 {
