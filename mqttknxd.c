@@ -11,12 +11,12 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <fnmatch.h>
-#include <poll.h>
 #include <syslog.h>
 #include <mosquitto.h>
 #include <eibclient.h>
 
 #include "lib/libt.h"
+#include "lib/libe.h"
 
 #define NAME "mqttknxd"
 #ifndef VERSION
@@ -724,14 +724,72 @@ static void test_config_seen(void *dat)
 		mylog(LOG_WARNING, "no items or events have been configured, it seems");
 }
 
+/* epoll handlers */
+static void mqtt_maintenance(void *dat)
+{
+	int ret;
+	struct mosquitto *mosq = dat;
+
+	ret = mosquitto_loop_misc(mosq);
+	if (ret)
+		mylog(LOG_ERR, "mosquitto_loop_misc: %s", mosquitto_strerror(ret));
+	libt_add_timeout(2.3, mqtt_maintenance, dat);
+}
+
+static void recvd_mosq(int fd, void *dat)
+{
+	struct mosquitto *mosq = dat;
+	int evs = libe_fd_evs(fd);
+	int ret;
+
+	if (evs & LIBE_RD) {
+		/* mqtt read ... */
+		ret = mosquitto_loop_read(mosq, 1);
+		if (ret)
+			mylog(LOG_ERR, "mosquitto_loop_read: %s", mosquitto_strerror(ret));
+	}
+	if (evs & LIBE_WR) {
+		/* flush mqtt write queue _after_ the timers have run */
+		ret = mosquitto_loop_write(mosq, 1);
+		if (ret)
+			mylog(LOG_ERR, "mosquitto_loop_write: %s", mosquitto_strerror(ret));
+	}
+}
+
+static void mosq_update_flags(void)
+{
+	if (mosq)
+		libe_mod_fd(mosquitto_socket(mosq), LIBE_RD | (mosquitto_want_write(mosq) ? LIBE_WR : 0));
+}
+
+static uint8_t buf[256];
+static void recvd_eib(int fd, void *dat)
+{
+	EIBConnection *eib = dat;
+	eibaddr_t src, dst;
+	int ret, pkthdr;
+
+	ret = EIB_Poll_Complete(eib);
+	if (ret < 0)
+		mylog(LOG_ERR, "EIB: poll_complete");
+	if (!ret)
+		return;
+	/* received */
+	ret = EIBGetGroup_Src(eib, sizeof (buf), buf, &src, &dst);
+	if (ret < 0)
+		mylog(LOG_ERR, "EIB: Get packet failed");
+	if (ret < 2)
+		/* packet too short */
+		return;
+
+	pkthdr = (buf[0] << 8) + buf[1];
+	eib_msg(eib, src, dst, pkthdr, buf+2, ret-2);
+}
+
 int main(int argc, char *argv[])
 {
 	int opt, ret;
-	struct pollfd pf[2] = {};
 	char *str;
-	eibaddr_t src, dst;
-	int pkthdr;
-	uint8_t buf[32];
 	int logmask = LOG_UPTO(LOG_NOTICE);
 	char **topics;
 
@@ -816,6 +874,8 @@ int main(int argc, char *argv[])
 		if (ret)
 			mylog(LOG_ERR, "mosquitto_subscribe %s: %s", *topics, mosquitto_strerror(ret));
 	}
+	libt_add_timeout(0, mqtt_maintenance, mosq);
+	libe_add_fd(mosquitto_socket(mosq), recvd_mosq, mosq);
 
 	/* EIB start */
 	eib = EIBSocketURL(eib_uri);
@@ -824,57 +884,16 @@ int main(int argc, char *argv[])
 	ret = EIBOpen_GroupSocket(eib, 0);
 	if (ret < 0)
 		mylog(LOG_ERR, "EIB: open groupsocket failed");
-
-	/* prepare poll */
-	pf[0].fd = mosquitto_socket(mosq);
-	pf[0].events = POLL_IN;
-	pf[1].fd = EIB_Poll_FD(eib);
-	pf[1].events = POLL_IN;
+	libe_add_fd(EIB_Poll_FD(eib), recvd_eib, eib);
 
 	/* run */
 	libt_add_timeout(2, test_config_seen, NULL);
 	while (!sigterm) {
 		libt_flush();
-		ret = libt_get_waittime();
-		if ((ret > 1000) || (ret < 0))
-			ret = 1000;
-		ret = poll(pf, 2, ret);
-		if (ret < 0 && errno == EINTR)
-			continue;
-		if (ret < 0)
-			mylog(LOG_ERR, "poll ...");
-		if (pf[0].revents) {
-			/* read ... */
-			ret = mosquitto_loop_read(mosq, 1);
-			if (ret)
-				mylog(LOG_ERR, "MQTT: read: %s", mosquitto_strerror(ret));
-		}
-		if (pf[1].revents) {
-			ret = EIB_Poll_Complete(eib);
-			if (ret < 0)
-				mylog(LOG_ERR, "EIB: poll_complete");
-			if (!ret)
-				goto eibdone;
-			/* received */
-			ret = EIBGetGroup_Src(eib, sizeof (buf), buf, &src, &dst);
-			if (ret < 0)
-				mylog(LOG_ERR, "EIB: Get packet failed");
-			if (ret < 2)
-				/* packet too short */
-				goto eibdone;
-			pkthdr = (buf[0] << 8) + buf[1];
-			eib_msg(eib, src, dst, pkthdr, buf+2, ret-2);
-eibdone: ;
-		}
-
-		ret = mosquitto_loop_misc(mosq);
-		if (ret)
-			mylog(LOG_ERR, "MQTT: read: %s", mosquitto_strerror(ret));
-		if (mosquitto_want_write(mosq)) {
-			ret = mosquitto_loop_write(mosq, 1);
-			if (ret)
-				mylog(LOG_ERR, "MQTT: read: %s", mosquitto_strerror(ret));
-		}
+		mosq_update_flags();
+		ret = libe_wait(libt_get_waittime());
+		if (ret >= 0)
+			libe_flush();
 	}
 
 	return 0;
