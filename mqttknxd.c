@@ -59,6 +59,7 @@ static const char help_msg[] =
 	"			8|1B	1byte payloads\n"
 	"			16|2B	2byte payloads\n"
 	"			32|4B	4byte payloads\n"
+	"			x	1st eib addr is the set request, 2nd is the \n"
 	;
 
 #ifdef _GNU_SOURCE
@@ -465,9 +466,13 @@ static void my_eib_send(eibaddr_t dst, uint16_t sdat, int value, int nbits)
 static void my_eib_write(void *dat)
 {
 	struct item *it = dat;
+	int idx;
 
-	if (it->naddr) {
-		my_eib_send(it->paddr[0], 0x0080, it->eqvalue, it->eibnbits);
+	/* select response addr */
+	idx = (item_option(it, 'x') && eib_owned(it)) ? 1 : 0;
+
+	if (idx < it->naddr) {
+		my_eib_send(it->paddr[idx], 0x0080, it->eqvalue, it->eibnbits);
 		it->etvalue = it->eqvalue;
 		it->flags |= EIB_PUBLISHED;
 	}
@@ -568,7 +573,9 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		if (str && *str == 'B')
 			it->eibnbits *= 8;
 
-		for (j = 0; j < it->naddr; ++j) {
+		if (item_option(it, 'x')) {
+			register_local_grp(it->paddr[0]);
+		} else for (j = 0; j < it->naddr; ++j) {
 			register_local_grp(it->paddr[j]);
 		}
 
@@ -687,6 +694,9 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 			for (naddr = 0; naddr < it->naddr; ++naddr) {
 				if (it->paddr[naddr] != dst)
 					continue;
+				if (naddr > 0 && item_option(it, 'x'))
+					/* ignore set request for req/resp items */
+					break;
 				it->evalue = evalue;
 				mylog(LOG_INFO, "%s matches %s:%i", eibgaddrtostr(dst), it->topic, naddr);
 				if (it->etvalue == evalue && (it->flags & EIB_PUBLISHED) && naddr == 0) {
