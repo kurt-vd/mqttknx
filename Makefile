@@ -6,7 +6,7 @@ PREFIX	= /usr/local
 CC	= gcc
 CFLAGS	= -Wall
 CPPFLAGS= -D_GNU_SOURCE
-LDLIBS	=
+LDLIBS	= -lm
 INSTOPTS= -s
 
 VERSION := $(shell git describe --tags --always)
