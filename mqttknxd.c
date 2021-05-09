@@ -187,10 +187,23 @@ struct event {
 };
 static struct event *events;
 
+struct addrsock {
+	struct addrsock *next;
+	struct addrsock *prev;
+
+	eibaddr_t addr;
+	int cnt;
+	EIBConnection *eib;
+};
+static struct addrsock *localgrps;
+
 static const char *eibgaddrtostr(eibaddr_t val);
 static void my_eib_write(void *dat);
 static void my_eib_response(void *dat);
 static void my_eib_request(void *dat);
+static void register_local_grp(eibaddr_t val);
+static void unregister_local_grp(eibaddr_t val);
+static void recvd_eib_grp(int fd, void *dat);
 
 static inline int mqtttoeib(double value, struct item *it)
 {
@@ -498,8 +511,13 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		/* this is an EIB config parameter */
 		char *str, *tok;
 		eibaddr_t addr;
+		int j;
 
 		it = topictoitem(msg->topic, eib_suffix, msg->payloadlen);
+		if (it && it->naddr) {
+			for (j = 0; j < it->naddr; ++j)
+				unregister_local_grp(it->paddr[j]);
+		}
 		if (!it || !msg->payloadlen) {
 			if (it)
 				delete_item(it);
@@ -549,6 +567,10 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		it->eibnbits = strtoul(strpbrk(it->options ?: "", "0123456789") ?: "1", &str, 10);
 		if (str && *str == 'B')
 			it->eibnbits *= 8;
+
+		for (j = 0; j < it->naddr; ++j) {
+			register_local_grp(it->paddr[j]);
+		}
 
 		/* refresh cache */
 		if (it->naddr && !item_option(it, 'r') && item_option(it, 'w'))
@@ -709,6 +731,76 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 	}
 }
 
+/* local group address management */
+static struct addrsock *find_addrsock(eibaddr_t val, struct addrsock *list)
+{
+	for (; list; list = list->next) {
+		if (val == list->addr)
+			break;
+	}
+	return list;
+}
+
+static void register_local_grp(eibaddr_t val)
+{
+	struct addrsock *as;
+	int ret;
+
+	as = find_addrsock(val, localgrps);
+	if (as) {
+		as->cnt += 1;
+		mylog(LOG_NOTICE, "inc local EIB groupaddr %s: %i", eibgaddrtostr(val), as->cnt);
+		return;
+	}
+	/* create new entry */
+	as = malloc(sizeof(*as));
+	memset(as, 0, sizeof(*as));
+	as->addr = val;
+	as->cnt = 1;
+
+	/* insert in linked list */
+	as->next = localgrps;
+	if (as->next) {
+		as->prev = as->next->prev;
+		as->next->prev = as;
+	} else
+		as->prev = (struct addrsock *)(((char *)&localgrps) - offsetof(struct addrsock, next));
+	as->prev->next = as;
+
+	as->eib = EIBSocketURL(eib_uri);
+	if (!as->eib)
+		mylog(LOG_ERR, "eib socket failed");
+	ret = EIBOpenT_Group(as->eib, val, 0);
+	if (ret < 0)
+		mylog(LOG_ERR, "EIB: open group failed");
+
+	mylog(LOG_NOTICE, "add local EIB groupaddr %s", eibgaddrtostr(val));
+	libe_add_fd(EIB_Poll_FD(as->eib), recvd_eib_grp, as->eib);
+}
+
+static void unregister_local_grp(eibaddr_t val)
+{
+	struct addrsock *as;
+
+	as = find_addrsock(val, localgrps);
+	if (!as)
+		return;
+	as->cnt -= 1;
+	if (as->cnt > 0) {
+		mylog(LOG_NOTICE, "dec local EIB groupaddr %s: %i", eibgaddrtostr(val), as->cnt);
+		return;
+	}
+	mylog(LOG_NOTICE, "del local EIB groupaddr %s", eibgaddrtostr(val));
+	/* cleanup resources */
+	if (as->prev)
+		as->prev->next = as->next;
+	if (as->next)
+		as->next->prev = as->prev;
+	if (as->eib)
+		EIBClose(as->eib);
+	free(as);
+}
+
 __attribute__((unused))
 static void my_exit(void)
 {
@@ -784,6 +876,22 @@ static void recvd_eib(int fd, void *dat)
 
 	pkthdr = (buf[0] << 8) + buf[1];
 	eib_msg(eib, src, dst, pkthdr, buf+2, ret-2);
+}
+
+static void recvd_eib_grp(int fd, void *dat)
+{
+	EIBConnection *eib = dat;
+	eibaddr_t src;
+	int ret;
+
+	ret = EIB_Poll_Complete(eib);
+	if (ret < 0)
+		mylog(LOG_ERR, "EIB: poll_complete");
+	if (!ret)
+		return;
+	/* received: read and forget
+	 * This is only to tell eibd to ack this group addr */
+	EIBGetAPDU_Src(eib, sizeof (buf), buf, &src);
 }
 
 int main(int argc, char *argv[])
