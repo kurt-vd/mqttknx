@@ -392,9 +392,11 @@ static void my_mqtt_log(struct mosquitto *mosq, void *userdata, int level, const
 	static const int logpri_map[] = {
 		MOSQ_LOG_ERR, LOG_ERR,
 		MOSQ_LOG_WARNING, LOG_WARNING,
+#if 0
 		MOSQ_LOG_NOTICE, LOG_NOTICE,
 		MOSQ_LOG_INFO, LOG_INFO,
 		MOSQ_LOG_DEBUG, LOG_DEBUG,
+#endif
 		0,
 	};
 	int j;
@@ -491,7 +493,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 	struct event *ev;
 	char *endp;
 
-	mylog(LOG_INFO, "mqtt:<%s %s", msg->topic, (char *)msg->payload ?: "<null>");
+	mylog(LOG_DEBUG, "mqtt:<%s %s", msg->topic, (char *)msg->payload ?: "<null>");
 	if (test_suffix(msg->topic, eib_suffix)) {
 		/* this is an EIB config parameter */
 		char *str, *tok;
