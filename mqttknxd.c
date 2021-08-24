@@ -573,7 +573,9 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		if (str && *str == 'B')
 			it->eibnbits *= 8;
 
-		if (item_option(it, 'x')) {
+		if (!item_option(it, 'w')) {
+			/* don't respond */
+		} else if (item_option(it, 'x')) {
 			register_local_grp(it->paddr[0]);
 		} else for (j = 0; j < it->naddr; ++j) {
 			register_local_grp(it->paddr[j]);
