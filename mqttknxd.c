@@ -575,8 +575,11 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 
 		if (!item_option(it, 'w')) {
 			/* don't respond */
-		} else if (item_option(it, 'x')) {
+		} else if (item_option(it, 'x') && eib_owned(it)) {
 			register_local_grp(it->paddr[0]);
+		} else if (item_option(it, 'x') && mqtt_owned(it)) {
+			for (j = 1; j < it->naddr; ++j)
+				register_local_grp(it->paddr[j]);
 		} else for (j = 0; j < it->naddr; ++j) {
 			register_local_grp(it->paddr[j]);
 		}
@@ -696,9 +699,18 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 			for (naddr = 0; naddr < it->naddr; ++naddr) {
 				if (it->paddr[naddr] != dst)
 					continue;
-				if (naddr > 0 && item_option(it, 'x'))
-					/* ignore set request for req/resp items */
-					break;
+				if (item_option(it, 'x')) {
+					/* req/resp item ... */
+					if (naddr > 0 && eib_owned(it)) {
+						/* ignore set request for eib-owned items
+						 * we expect a response from eib soon
+						 */
+						break;
+					} else if (naddr == 0 && mqtt_owned(it)) {
+						/* ignore status report for mqtt items */
+						break;
+					}
+				}
 				it->evalue = evalue;
 				mylog(LOG_INFO, "%s matches %s:%i", eibgaddrtostr(dst), it->topic, naddr);
 				if (it->etvalue == evalue && (it->flags & EIB_PUBLISHED) && naddr == 0) {
@@ -718,7 +730,7 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 					ret = mosquitto_publish(mosq, NULL, dsttopic, strlen(vstr), vstr, mqtt_qos, dsttopic == it->topic);
 					if (ret)
 						mylog(LOG_ERR, "mosquitto_publish %s '%s': %s", dsttopic, vstr, mosquitto_strerror(ret));
-					else {
+					else if (!item_option(it, 'x')) {
 						it->flags |= MQTT_PUBLISHED;
 						it->mtvalue = devalue;
 					}
