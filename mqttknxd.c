@@ -551,10 +551,10 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			it->eibnbits *= 8;
 
 		/* refresh cache */
-		if (it->naddr && !item_option(it, 'r') && item_option(it, 'w'))
+		if (it->naddr && eib_owned(it) && item_option(it, 'w'))
 			/* schedule eib request */
 			libt_add_timeouta(next_eib_timeslot(), my_eib_request, it);
-		if (it->naddr && item_option(it, 't') && item_option(it, 'r')) {
+		if (it->naddr && item_option(it, 't') && mqtt_owned(it)) {
 			/* propagate MQTT cached value to EIB */
 			it->eqvalue = mqtttoeib(it->mvalue, it);
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
