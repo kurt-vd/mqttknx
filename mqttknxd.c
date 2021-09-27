@@ -11,12 +11,12 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <fnmatch.h>
-#include <poll.h>
 #include <syslog.h>
 #include <mosquitto.h>
 #include <eibclient.h>
 
 #include "lib/libt.h"
+#include "lib/libe.h"
 
 #define NAME "mqttknxd"
 #ifndef VERSION
@@ -187,10 +187,23 @@ struct event {
 };
 static struct event *events;
 
+struct addrsock {
+	struct addrsock *next;
+	struct addrsock *prev;
+
+	eibaddr_t addr;
+	int cnt;
+	EIBConnection *eib;
+};
+static struct addrsock *localgrps;
+
 static const char *eibgaddrtostr(eibaddr_t val);
 static void my_eib_write(void *dat);
 static void my_eib_response(void *dat);
 static void my_eib_request(void *dat);
+static void register_local_grp(eibaddr_t val);
+static void unregister_local_grp(eibaddr_t val);
+static void recvd_eib_grp(int fd, void *dat);
 
 static inline int mqtttoeib(double value, struct item *it)
 {
@@ -498,8 +511,13 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		/* this is an EIB config parameter */
 		char *str, *tok;
 		eibaddr_t addr;
+		int j;
 
 		it = topictoitem(msg->topic, eib_suffix, msg->payloadlen);
+		if (it && it->naddr) {
+			for (j = 0; j < it->naddr; ++j)
+				unregister_local_grp(it->paddr[j]);
+		}
 		if (!it || !msg->payloadlen) {
 			if (it)
 				delete_item(it);
@@ -549,6 +567,10 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		it->eibnbits = strtoul(strpbrk(it->options ?: "", "0123456789") ?: "1", &str, 10);
 		if (str && *str == 'B')
 			it->eibnbits *= 8;
+
+		for (j = 0; j < it->naddr; ++j) {
+			register_local_grp(it->paddr[j]);
+		}
 
 		/* refresh cache */
 		if (it->naddr && eib_owned(it) && item_option(it, 'w'))
@@ -709,6 +731,76 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 	}
 }
 
+/* local group address management */
+static struct addrsock *find_addrsock(eibaddr_t val, struct addrsock *list)
+{
+	for (; list; list = list->next) {
+		if (val == list->addr)
+			break;
+	}
+	return list;
+}
+
+static void register_local_grp(eibaddr_t val)
+{
+	struct addrsock *as;
+	int ret;
+
+	as = find_addrsock(val, localgrps);
+	if (as) {
+		as->cnt += 1;
+		mylog(LOG_NOTICE, "inc local EIB groupaddr %s: %i", eibgaddrtostr(val), as->cnt);
+		return;
+	}
+	/* create new entry */
+	as = malloc(sizeof(*as));
+	memset(as, 0, sizeof(*as));
+	as->addr = val;
+	as->cnt = 1;
+
+	/* insert in linked list */
+	as->next = localgrps;
+	if (as->next) {
+		as->prev = as->next->prev;
+		as->next->prev = as;
+	} else
+		as->prev = (struct addrsock *)(((char *)&localgrps) - offsetof(struct addrsock, next));
+	as->prev->next = as;
+
+	as->eib = EIBSocketURL(eib_uri);
+	if (!as->eib)
+		mylog(LOG_ERR, "eib socket failed");
+	ret = EIBOpenT_Group(as->eib, val, 0);
+	if (ret < 0)
+		mylog(LOG_ERR, "EIB: open group failed");
+
+	mylog(LOG_NOTICE, "add local EIB groupaddr %s", eibgaddrtostr(val));
+	libe_add_fd(EIB_Poll_FD(as->eib), recvd_eib_grp, as->eib);
+}
+
+static void unregister_local_grp(eibaddr_t val)
+{
+	struct addrsock *as;
+
+	as = find_addrsock(val, localgrps);
+	if (!as)
+		return;
+	as->cnt -= 1;
+	if (as->cnt > 0) {
+		mylog(LOG_NOTICE, "dec local EIB groupaddr %s: %i", eibgaddrtostr(val), as->cnt);
+		return;
+	}
+	mylog(LOG_NOTICE, "del local EIB groupaddr %s", eibgaddrtostr(val));
+	/* cleanup resources */
+	if (as->prev)
+		as->prev->next = as->next;
+	if (as->next)
+		as->next->prev = as->prev;
+	if (as->eib)
+		EIBClose(as->eib);
+	free(as);
+}
+
 __attribute__((unused))
 static void my_exit(void)
 {
@@ -724,14 +816,88 @@ static void test_config_seen(void *dat)
 		mylog(LOG_WARNING, "no items or events have been configured, it seems");
 }
 
+/* epoll handlers */
+static void mqtt_maintenance(void *dat)
+{
+	int ret;
+	struct mosquitto *mosq = dat;
+
+	ret = mosquitto_loop_misc(mosq);
+	if (ret)
+		mylog(LOG_ERR, "mosquitto_loop_misc: %s", mosquitto_strerror(ret));
+	libt_add_timeout(2.3, mqtt_maintenance, dat);
+}
+
+static void recvd_mosq(int fd, void *dat)
+{
+	struct mosquitto *mosq = dat;
+	int evs = libe_fd_evs(fd);
+	int ret;
+
+	if (evs & LIBE_RD) {
+		/* mqtt read ... */
+		ret = mosquitto_loop_read(mosq, 1);
+		if (ret)
+			mylog(LOG_ERR, "mosquitto_loop_read: %s", mosquitto_strerror(ret));
+	}
+	if (evs & LIBE_WR) {
+		/* flush mqtt write queue _after_ the timers have run */
+		ret = mosquitto_loop_write(mosq, 1);
+		if (ret)
+			mylog(LOG_ERR, "mosquitto_loop_write: %s", mosquitto_strerror(ret));
+	}
+}
+
+static void mosq_update_flags(void)
+{
+	if (mosq)
+		libe_mod_fd(mosquitto_socket(mosq), LIBE_RD | (mosquitto_want_write(mosq) ? LIBE_WR : 0));
+}
+
+static uint8_t buf[256];
+static void recvd_eib(int fd, void *dat)
+{
+	EIBConnection *eib = dat;
+	eibaddr_t src, dst;
+	int ret, pkthdr;
+
+	ret = EIB_Poll_Complete(eib);
+	if (ret < 0)
+		mylog(LOG_ERR, "EIB: poll_complete");
+	if (!ret)
+		return;
+	/* received */
+	ret = EIBGetGroup_Src(eib, sizeof (buf), buf, &src, &dst);
+	if (ret < 0)
+		mylog(LOG_ERR, "EIB: Get packet failed");
+	if (ret < 2)
+		/* packet too short */
+		return;
+
+	pkthdr = (buf[0] << 8) + buf[1];
+	eib_msg(eib, src, dst, pkthdr, buf+2, ret-2);
+}
+
+static void recvd_eib_grp(int fd, void *dat)
+{
+	EIBConnection *eib = dat;
+	eibaddr_t src;
+	int ret;
+
+	ret = EIB_Poll_Complete(eib);
+	if (ret < 0)
+		mylog(LOG_ERR, "EIB: poll_complete");
+	if (!ret)
+		return;
+	/* received: read and forget
+	 * This is only to tell eibd to ack this group addr */
+	EIBGetAPDU_Src(eib, sizeof (buf), buf, &src);
+}
+
 int main(int argc, char *argv[])
 {
 	int opt, ret;
-	struct pollfd pf[2] = {};
 	char *str;
-	eibaddr_t src, dst;
-	int pkthdr;
-	uint8_t buf[32];
 	int logmask = LOG_UPTO(LOG_NOTICE);
 	char **topics;
 
@@ -816,6 +982,8 @@ int main(int argc, char *argv[])
 		if (ret)
 			mylog(LOG_ERR, "mosquitto_subscribe %s: %s", *topics, mosquitto_strerror(ret));
 	}
+	libt_add_timeout(0, mqtt_maintenance, mosq);
+	libe_add_fd(mosquitto_socket(mosq), recvd_mosq, mosq);
 
 	/* EIB start */
 	eib = EIBSocketURL(eib_uri);
@@ -824,57 +992,16 @@ int main(int argc, char *argv[])
 	ret = EIBOpen_GroupSocket(eib, 0);
 	if (ret < 0)
 		mylog(LOG_ERR, "EIB: open groupsocket failed");
-
-	/* prepare poll */
-	pf[0].fd = mosquitto_socket(mosq);
-	pf[0].events = POLL_IN;
-	pf[1].fd = EIB_Poll_FD(eib);
-	pf[1].events = POLL_IN;
+	libe_add_fd(EIB_Poll_FD(eib), recvd_eib, eib);
 
 	/* run */
 	libt_add_timeout(2, test_config_seen, NULL);
 	while (!sigterm) {
 		libt_flush();
-		ret = libt_get_waittime();
-		if ((ret > 1000) || (ret < 0))
-			ret = 1000;
-		ret = poll(pf, 2, ret);
-		if (ret < 0 && errno == EINTR)
-			continue;
-		if (ret < 0)
-			mylog(LOG_ERR, "poll ...");
-		if (pf[0].revents) {
-			/* read ... */
-			ret = mosquitto_loop_read(mosq, 1);
-			if (ret)
-				mylog(LOG_ERR, "MQTT: read: %s", mosquitto_strerror(ret));
-		}
-		if (pf[1].revents) {
-			ret = EIB_Poll_Complete(eib);
-			if (ret < 0)
-				mylog(LOG_ERR, "EIB: poll_complete");
-			if (!ret)
-				goto eibdone;
-			/* received */
-			ret = EIBGetGroup_Src(eib, sizeof (buf), buf, &src, &dst);
-			if (ret < 0)
-				mylog(LOG_ERR, "EIB: Get packet failed");
-			if (ret < 2)
-				/* packet too short */
-				goto eibdone;
-			pkthdr = (buf[0] << 8) + buf[1];
-			eib_msg(eib, src, dst, pkthdr, buf+2, ret-2);
-eibdone: ;
-		}
-
-		ret = mosquitto_loop_misc(mosq);
-		if (ret)
-			mylog(LOG_ERR, "MQTT: read: %s", mosquitto_strerror(ret));
-		if (mosquitto_want_write(mosq)) {
-			ret = mosquitto_loop_write(mosq, 1);
-			if (ret)
-				mylog(LOG_ERR, "MQTT: read: %s", mosquitto_strerror(ret));
-		}
+		mosq_update_flags();
+		ret = libe_wait(libt_get_waittime());
+		if (ret >= 0)
+			libe_flush();
 	}
 
 	return 0;

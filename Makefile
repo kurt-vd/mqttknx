@@ -17,7 +17,7 @@ CPPFLAGS += -DVERSION=\"$(VERSION)\"
 
 eibtimeoff eibgtrace: LDLIBS:=-leibclient $(LDLIBS) -lrt
 mqttknxd: LDLIBS:=-lmosquitto -leibclient $(LDLIBS)
-mqttknxd: lib/libt.o
+mqttknxd: lib/libt.o lib/libe.o
 
 install: $(PROGS)
 	$(foreach PROG, $(PROGS), install -vp -m 0777 $(INSTOPTS) $(PROG) $(DESTDIR)$(PREFIX)/bin/$(PROG);)
