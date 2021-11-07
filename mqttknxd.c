@@ -171,6 +171,7 @@ struct item {
 	int flags;
 #define MQTT_PUBLISHED	(1 << 0)
 #define EIB_PUBLISHED	(1 << 1)
+	double changed; /* libt_now() of last change, used for repeating */
 	int eibnbits;
 	eibaddr_t *paddr;
 	int naddr;
@@ -203,6 +204,7 @@ static struct addrsock *localgrps;
 
 static const char *eibgaddrtostr(eibaddr_t val);
 static void my_eib_write(void *dat);
+static void my_eib_write_repeat(void *dat);
 static void my_eib_response(void *dat);
 static void my_eib_request(void *dat);
 static void register_local_grp(eibaddr_t val);
@@ -265,6 +267,7 @@ static void item_add_addr(struct item *it, eibaddr_t addr)
 static void delete_item(struct item *it)
 {
 	libt_remove_timeout(my_eib_write, it);
+	libt_remove_timeout(my_eib_write_repeat, it);
 	libt_remove_timeout(my_eib_response, it);
 	libt_remove_timeout(my_eib_request, it);
 	if (it->prev)
@@ -473,11 +476,32 @@ static void my_eib_write(void *dat)
 	/* select response addr */
 	idx = (item_option(it, 'x') && eib_owned(it)) ? 1 : 0;
 
-	if (idx < it->naddr) {
-		my_eib_send(it->paddr[idx], 0x0080, it->eqvalue, it->eibnbits);
-		it->etvalue = it->eqvalue;
-		it->flags |= EIB_PUBLISHED;
+	if (idx >= it->naddr)
+		return;
+	my_eib_send(it->paddr[idx], 0x0080, it->eqvalue, it->eibnbits);
+	it->etvalue = it->eqvalue;
+	it->flags |= EIB_PUBLISHED;
+
+	if (mqtt_owned(it) && item_option(it, 't') && (item_option(it, 'x') || !item_option(it, 'w'))) {
+		/* repeat transmission regularly */
+		double now = libt_now();
+		double delay;
+
+		if ((now - it->changed) < 65)
+			delay = 10;
+		else if ((now - it->changed) < 330)
+			delay = 60;
+		else
+			delay = 300;
+		libt_add_timeout(delay, my_eib_write_repeat, it);
 	}
+}
+
+static void my_eib_write_repeat(void *dat)
+{
+	struct item *it = dat;
+
+	libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 }
 
 static void my_eib_response(void *dat)
@@ -593,6 +617,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		if (it->naddr && item_option(it, 't') && mqtt_owned(it)) {
 			/* propagate MQTT cached value to EIB */
 			it->eqvalue = mqtttoeib(it->mvalue, it);
+			it->changed = libt_now();
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 		}
 		/* clear flags that may be wrong due to a changed addr */
@@ -621,6 +646,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			it->mvalue = strtod(msg->payload ?: "0", NULL);
 			/* forward non-local requests to EIB */
 			it->eqvalue = mqtttoeib(it->mvalue, it);
+			it->changed = libt_now();
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 		}
 
@@ -645,6 +671,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		/* schedule eib write */
 		if (it->naddr && item_option(it, 't')) {
 			it->eqvalue = mqtttoeib(it->mvalue, it);
+			it->changed = libt_now();
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 		}
 	}
