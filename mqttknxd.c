@@ -60,6 +60,7 @@ static const char help_msg[] =
 	"			16|2B	2byte payloads\n"
 	"			32|4B	4byte payloads\n"
 	"			x	1st eib addr is the set request, 2nd is the \n"
+	" -t, --delay=TIME	delay between sent packets (default 0.1s)\n"
 	;
 
 #ifdef _GNU_SOURCE
@@ -74,6 +75,7 @@ static struct option long_opts[] = {
 	{ "suffix", required_argument, NULL, 's', },
 	{ "evsuffix", required_argument, NULL, 'S', },
 	{ "write", required_argument, NULL, 'w', },
+	{ "delay", required_argument, NULL, 't', },
 
 	{ },
 };
@@ -81,7 +83,7 @@ static struct option long_opts[] = {
 #define getopt_long(argc, argv, optstring, longopts, longindex) \
 	getopt((argc), (argv), (optstring))
 #endif
-static const char optstring[] = "Vv?f:e:m:s:S:w:";
+static const char optstring[] = "Vv?f:e:m:s:S:w:t:";
 
 /* signal handler */
 static volatile int sigterm;
@@ -146,6 +148,7 @@ static const char *mqtt_write_suffix = "/set";
 static char *eib_suffix = "/eib";
 static char *eibev_suffix = "/eibevent";
 static char *default_options = "wt";
+static double pktdelay = 0.1;
 
 /* EIB parameters */
 static const char *eib_uri = "ip:localhost";
@@ -426,14 +429,13 @@ static void my_mqtt_log(struct mosquitto *mosq, void *userdata, int level, const
 /* schedule next EIB transmission */
 static double next_eib_timeslot(void)
 {
-#define PKT_DELAY	0.1
 	static double filled_eib_slot = 0;
 	double tnow = libt_now();
 
-	if ((filled_eib_slot + PKT_DELAY) < tnow)
+	if ((filled_eib_slot + pktdelay) < tnow)
 		filled_eib_slot = tnow;
 	else
-		filled_eib_slot += PKT_DELAY;
+		filled_eib_slot += pktdelay;
 	return filled_eib_slot;
 }
 
@@ -975,6 +977,9 @@ int main(int argc, char *argv[])
 		break;
 	case 'f':
 		default_options = optarg;
+		break;
+	case 't':
+		pktdelay = strtod(optarg, NULL);
 		break;
 	}
 
