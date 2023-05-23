@@ -88,10 +88,10 @@ const char *nowstr(void)
 	int ret;
 	static char buf[64];
 
-	ret = clock_gettime(CLOCK_MONOTONIC, &ts);
+	ret = clock_gettime(CLOCK_REALTIME, &ts);
 	if (ret < 0)
 		mylog(LOG_ERR, "clock_gettime failed: %s", ESTR(errno));
-	sprintf(buf, "%lu.%06lu", ts.tv_sec, ts.tv_nsec / 1000);
+	sprintf(buf, "%llu.%06lu", (long long)ts.tv_sec, ts.tv_nsec / 1000);
 	return buf;
 }
 
