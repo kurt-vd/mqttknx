@@ -508,8 +508,11 @@ static void my_eib_response(void *dat)
 {
 	struct item *it = dat;
 
-	if (it->naddr)
-		my_eib_send(it->paddr[0], 0x0040, mqtttoeib(it->mvalue, it), it->eibnbits);
+	if (it->naddr) {
+		my_eib_send(it->paddr[0], 0x0040, it->etvalue, it->eibnbits);
+		it->etvalue = mqtttoeib(it->mvalue, it);
+		it->flags |= EIB_PUBLISHED;
+	}
 }
 
 static void my_eib_request(void *dat)
