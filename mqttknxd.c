@@ -24,6 +24,7 @@
 #endif
 
 /* generic error logging */
+static int max_loglevel = LOG_NOTICE;
 #define mylog(loglevel, fmt, ...) \
 	({\
 		syslog(loglevel, fmt, ##__VA_ARGS__); \
@@ -534,14 +535,33 @@ static int test_suffix(const char *topic, const char *suffix)
 	return !strcmp(topic+len, suffix ?: "");
 }
 
+static int test_prefix(const char *topic, const char *prefix, char **result)
+{
+	int len;
+	int ret;
+
+	len = strlen(prefix);
+	ret = strncmp(topic, prefix, len);
+	if (!ret && result)
+		*result = (char *)topic + len;
+	return !ret;
+}
+
 static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitto_message *msg)
 {
 	struct item *it;
 	struct event *ev;
 	char *endp;
+	char *topic;
 
 	mylog(LOG_DEBUG, "mqtt:<%s %s", msg->topic, (char *)msg->payload ?: "<null>");
-	if (test_suffix(msg->topic, eib_suffix)) {
+	if (test_prefix(msg->topic, "cfg/"NAME"/", &topic)) {
+		if (!strcmp(topic, "loglevel")) {
+			max_loglevel = strtol((char *)msg->payload ?: "", NULL, 0);
+			setlogmask(LOG_UPTO(max_loglevel));
+			mylog(LOG_NOTICE, "changed verbose %i", max_loglevel);
+		}
+	} else if (test_suffix(msg->topic, eib_suffix)) {
 		/* this is an EIB config parameter */
 		char *str, *tok;
 		eibaddr_t addr;
@@ -950,11 +970,19 @@ static void recvd_eib_grp(int fd, void *dat)
 	EIBGetAPDU_Src(eib, sizeof (buf), buf, &src);
 }
 
+static void mqtt_sub(const char *sub, int opts)
+{
+	int ret;
+
+	ret = mosquitto_subscribe(mosq, NULL, sub, mqtt_qos);
+	if (ret)
+		mylog(LOG_ERR, "mosquitto_subscribe %s: %s", sub, mosquitto_strerror(ret));
+}
+
 int main(int argc, char *argv[])
 {
 	int opt, ret;
 	char *str;
-	int logmask = LOG_UPTO(LOG_NOTICE);
 	char **topics;
 
 	/* argument parsing */
@@ -973,14 +1001,7 @@ int main(int argc, char *argv[])
 		exit(1);
 		break;
 	case 'v':
-		switch (logmask) {
-		case LOG_UPTO(LOG_NOTICE):
-			logmask = LOG_UPTO(LOG_INFO);
-			break;
-		case LOG_UPTO(LOG_INFO):
-			logmask = LOG_UPTO(LOG_DEBUG);
-			break;
-		}
+		++max_loglevel;
 		break;
 	case 'e':
 		eib_uri = optarg;
@@ -1018,7 +1039,7 @@ int main(int argc, char *argv[])
 	//atexit(my_exit);
 
 	openlog(NAME, LOG_PERROR, LOG_LOCAL2);
-	setlogmask(logmask);
+	setlogmask(LOG_UPTO(max_loglevel));
 	/* MQTT start */
 	mosquitto_lib_init();
 	mosq = mosquitto_new(csprintf("eibd:%s #%i", eib_uri, getpid()), true, 0);
@@ -1035,11 +1056,12 @@ int main(int argc, char *argv[])
 		mylog(LOG_ERR, "mosquitto_connect %s:%i: %s", mqtt_host, mqtt_port, mosquitto_strerror(ret));
 
 	/* subscribe to topics */
-	topics = (optind >= argc) ? ((char *[]){ "#", NULL, }) : (argv+optind);
-	for (; *topics; ++topics) {
-		ret = mosquitto_subscribe(mosq, NULL, *topics, mqtt_qos);
-		if (ret)
-			mylog(LOG_ERR, "mosquitto_subscribe %s: %s", *topics, mosquitto_strerror(ret));
+	if (optind >= argc) {
+		mqtt_sub("#", 0);
+	} else {
+		mqtt_sub("cfg/"NAME"/#", 0);
+		for (topics = argv+optind; *topics; ++topics)
+			mqtt_sub(*topics, 0);
 	}
 	libt_add_timeout(0, mqtt_maintenance, mosq);
 	libe_add_fd(mosquitto_socket(mosq), recvd_mosq, mosq);
