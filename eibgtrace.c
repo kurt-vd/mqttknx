@@ -55,7 +55,6 @@ struct item {
 
 /* EIB parameters */
 static const char *eib_uri = "ip:localhost";
-static int logtosyslog;
 
 /* State */
 static EIBConnection *eib;
@@ -99,6 +98,7 @@ int main(int argc, char *argv[])
 {
 	int opt, ret, j;
 	uint16_t pkthdr;
+	uint16_t cmd;
 	uint32_t value;
 	eibaddr_t src, dst;
 	uint8_t buf[32];
@@ -110,9 +110,6 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "%s %s\nCompiled on %s %s\n",
 				NAME, VERSION, __DATE__, __TIME__);
 		exit(0);
-	case 's':
-		logtosyslog = 1;
-		break;
 
 	default:
 		fprintf(stderr, "unknown option '%c'", opt);
@@ -151,9 +148,12 @@ int main(int argc, char *argv[])
 			/* too short, just ignore */
 			continue;
 		pkthdr = (buf[0] << 8) + buf[1];
+		cmd = (pkthdr >> 6) & 0xf;
+#if 0
 		if (((pkthdr & 0x03c0) != 0x0040) && (pkthdr & 0x03c0) != 0x0080)
 			/* only process response & write */
 			continue;
+#endif
 		/* write */
 		value = pkthdr & 0x3f;
 		if (ret > 2) {
@@ -165,12 +165,13 @@ int main(int argc, char *argv[])
 			for (j = 0; j < ret; ++j)
 				value = (value << 8) + buf[2+j];
 		}
-		if (logtosyslog)
-			syslog(LOG_INFO, "%s %s %u\n", eibphysstr(src), eibgroupstr(dst), value);
-		else {
-			printf("%s %s %s %u\n", nowstr(), eibphysstr(src), eibgroupstr(dst), value);
-			fflush(stdout);
-		}
+		static const char *cmdstrs[16] = {
+			[0] = "r,",
+			[1] = "w,",
+			//[2] = "t,",
+		};
+		printf("%s %s %s %s%u\n", nowstr(), eibphysstr(src), eibgroupstr(dst), cmdstrs[cmd] ?: "", value);
+		fflush(stdout);
 	}
 
 	return 0;
