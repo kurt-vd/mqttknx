@@ -150,6 +150,7 @@ static char *eib_suffix = "/eib";
 static char *eibev_suffix = "/eibevent";
 static char *default_options = "wt";
 static double pktdelay = 0.1;
+static int max_repeats = 3;
 
 /* EIB parameters */
 static const char *eib_uri = "ip:localhost";
@@ -173,6 +174,7 @@ struct item {
 #define MQTT_PUBLISHED	(1 << 0)
 #define EIB_PUBLISHED	(1 << 1)
 	double changed; /* libt_now() of last change, used for repeating */
+	int repeats; /* number of transmissions */
 	int eibnbits;
 	eibaddr_t *paddr;
 	int naddr;
@@ -494,7 +496,10 @@ static void my_eib_write(void *dat)
 			delay = 60;
 		else
 			delay = 300;
-		libt_add_timeout(delay, my_eib_write_repeat, it);
+
+		++it->repeats;
+		if (max_repeats < 0 || it->repeats < max_repeats)
+			libt_add_timeout(delay, my_eib_write_repeat, it);
 	}
 }
 
@@ -560,6 +565,10 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			max_loglevel = strtol((char *)msg->payload ?: "", NULL, 0);
 			setlogmask(LOG_UPTO(max_loglevel));
 			mylog(LOG_NOTICE, "changed verbose %i", max_loglevel);
+
+		} else if (!strcmp(topic, "repeat")) {
+			max_repeats = strtoul((char *)msg->payload ?: "", NULL, 0);
+			mylog(LOG_NOTICE, "changed #repeat %i", max_repeats);
 		}
 	} else if (test_suffix(msg->topic, eib_suffix)) {
 		/* this is an EIB config parameter */
@@ -641,6 +650,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			/* propagate MQTT cached value to EIB */
 			it->eqvalue = mqtttoeib(it->mvalue, it);
 			it->changed = libt_now();
+			it->repeats = 0;
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 		}
 		/* clear flags that may be wrong due to a changed addr */
@@ -670,6 +680,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			/* forward non-local requests to EIB */
 			it->eqvalue = mqtttoeib(it->mvalue, it);
 			it->changed = libt_now();
+			it->repeats = 0;
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 		}
 
@@ -695,6 +706,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		if (it->naddr && item_option(it, 't')) {
 			it->eqvalue = mqtttoeib(it->mvalue, it);
 			it->changed = libt_now();
+			it->repeats = 0;
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
 		}
 	}
