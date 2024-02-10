@@ -155,6 +155,9 @@ static int max_repeats = 3;
 /* EIB parameters */
 static const char *eib_uri = "ip:localhost";
 
+/* dimmer steps for 4bit EIB relative dimming */
+static const double eib_dimsteps[8] = { 0, 1.0/64, 1.0/32, 1.0/16, 1.0/8, 1.0/4, 1.0/2, 1.0/1 };
+
 /* state */
 static struct mosquitto *mosq;
 static EIBConnection *eib;
@@ -179,10 +182,13 @@ struct item {
 	eibaddr_t *paddr;
 	int naddr;
 	int saddr;
+	eibaddr_t dimaddr;
+	int eibdimval; /* current pending dimming value, used in both directions */
 	char *options;
 	char *topic;
 	int topiclen;
 	char *writetopic;
+	char *dimtopic;
 };
 static struct item *items;
 
@@ -213,6 +219,9 @@ static void my_eib_request(void *dat);
 static void register_local_grp(eibaddr_t val);
 static void unregister_local_grp(eibaddr_t val);
 static void recvd_eib_grp(int fd, void *dat);
+static void my_eib_send_dim(void *dat);
+static void my_eib_repeat_dim(void *dat);
+static void my_mqtt_repeat_dim(void *dat);
 
 static inline int mqtttoeib(double value, struct item *it)
 {
@@ -273,6 +282,9 @@ static void delete_item(struct item *it)
 	libt_remove_timeout(my_eib_write_repeat, it);
 	libt_remove_timeout(my_eib_response, it);
 	libt_remove_timeout(my_eib_request, it);
+	libt_remove_timeout(my_eib_send_dim, it);
+	libt_remove_timeout(my_eib_repeat_dim, it);
+	libt_remove_timeout(my_mqtt_repeat_dim, it);
 	if (it->prev)
 		it->prev->next = it->next;
 	if (it->next)
@@ -282,6 +294,8 @@ static void delete_item(struct item *it)
 	free(it->topic);
 	if (it->writetopic)
 		free(it->writetopic);
+	if (it->dimtopic)
+		free(it->dimtopic);
 	free(it);
 }
 
@@ -529,6 +543,49 @@ static void my_eib_request(void *dat)
 		my_eib_send(it->paddr[0], 0x0000, 0, 0);
 }
 
+static void my_eib_send_dim(void *dat)
+{
+	struct item *it = dat;
+
+	my_eib_send(it->dimaddr, 0x0080, it->eibdimval, 4);
+}
+
+static void my_eib_repeat_dim(void *dat)
+{
+	struct item *it = dat;
+
+	libt_add_timeouta(next_eib_timeslot(), my_eib_send_dim, it);
+	if (it->eibdimval)
+		/* schedule repeat when dimval != 0 */
+		libt_add_timeout(0.5, my_eib_repeat_dim, it);
+}
+
+static void my_mqtt_repeat_dim(void *dat)
+{
+	struct item *it = dat;
+	int ret;
+	char buf[32];
+
+	if (it->eibdimval) {
+		int dir = ((it->eibdimval >> 3) & 1) ? 1 : -1; /* turn 0/1 into -1/+1 */
+		int stp = (it->eibdimval >> 0) & 7;
+
+		sprintf(buf, "%+.3f", eib_dimsteps[stp]*dir);
+	} else {
+		strcpy(buf, "0");
+	}
+
+	if (!it->dimtopic)
+		asprintf(&it->dimtopic, "%s/dim", it->topic);
+
+	ret = mosquitto_publish(mosq, NULL, it->dimtopic, strlen(buf), buf, mqtt_qos, 0);
+	if (ret)
+		mylog(LOG_ERR, "mosquitto_publish %s '%s': %s", it->dimtopic, buf, mosquitto_strerror(ret));
+
+	if (it->eibdimval)
+		libt_add_timeout(0.5, my_mqtt_repeat_dim, it);
+}
+
 static int test_suffix(const char *topic, const char *suffix)
 {
 	int len;
@@ -584,6 +641,8 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		if (it && it->naddr) {
 			for (j = 0; j < it->naddr; ++j)
 				unregister_local_grp(it->paddr[j]);
+			if (mqtt_owned(it) && it->dimaddr)
+				unregister_local_grp(it->dimaddr);
 		}
 		if (!it || !msg->payloadlen) {
 			if (it)
@@ -626,6 +685,8 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 				it->mul = 1/strtod(str, NULL);
 			else if (!strcmp(tok, "offset"))
 				it->off = strtod(str, NULL);
+			else if (!strcmp(tok, "dim"))
+				it->dimaddr = strtoeibgaddr(str, &endp);
 			else
 				mylog(LOG_WARNING, "%s: unknown option %s", it->topic, tok);
 		}
@@ -645,6 +706,8 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		} else for (j = 0; j < it->naddr; ++j) {
 			register_local_grp(it->paddr[j]);
 		}
+		if (mqtt_owned(it) && it->dimaddr)
+			register_local_grp(it->dimaddr);
 
 		/* refresh cache */
 		if (it->naddr && eib_owned(it) && item_option(it, 'w'))
@@ -686,6 +749,33 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			it->changed = libt_now();
 			it->repeats = 0;
 			libt_add_timeouta(next_eib_timeslot(), my_eib_write, it);
+		}
+
+	} else if (test_suffix(msg->topic, "/dim")) {
+		if (msg->retain)
+			/* ignore retained request */
+			return;
+		it = topictoitem(msg->topic, "/dim", 0);
+		if (!it)
+			return;
+		if (it->dimaddr && eib_owned(it)) {
+			double value = strtod(msg->payload ?: "0", NULL);
+			int eibval;
+			int j;
+
+			for (j = 0; j < 7; ++j) {
+				if (fabs(value) < (eib_dimsteps[j]+eib_dimsteps[j+1])/2)
+					break;
+			}
+			eibval = j;
+			/* the test '< 0' is a bit dangerous close to 0,
+			 * but close to 0, j would also be 0
+			 */
+			if (j && value > 0)
+				eibval |= 0x8;
+			/* remember dimming value */
+			it->eibdimval = eibval;
+			libt_add_timeout(0, my_eib_repeat_dim, it);
 		}
 
 	} else {
@@ -764,6 +854,19 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 				/* remove pending request for this item */
 				libt_remove_timeout(my_eib_request, it);
 
+			if (mqtt_owned(it) && it->dimaddr && dst == it->dimaddr) {
+				int dimval = evalue & 0xf;
+
+				if (dimval != it->eibdimval || !dimval) {
+					/* only propagate when changed
+					 * so subsequent dim commands with equal value
+					 * are silenced in favor of our own dim repeater
+					 * allow to repeat when turning off.
+					 */
+					it->eibdimval = dimval;
+					libt_add_timeout(0, my_mqtt_repeat_dim, it);
+				}
+			}
 			for (naddr = 0; naddr < it->naddr; ++naddr) {
 				if (it->paddr[naddr] != dst)
 					continue;
