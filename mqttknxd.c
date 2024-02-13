@@ -566,6 +566,10 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 			setlogmask(LOG_UPTO(max_loglevel));
 			mylog(LOG_NOTICE, "changed verbose %i", max_loglevel);
 
+		} else if (!strcmp(topic, "delay")) {
+			pktdelay = strtod((char *)msg->payload ?: "", NULL);
+			mylog(LOG_NOTICE, "changed #delay %.2f", pktdelay);
+
 		} else if (!strcmp(topic, "repeat")) {
 			max_repeats = strtoul((char *)msg->payload ?: "", NULL, 0);
 			mylog(LOG_NOTICE, "changed #repeat %i", max_repeats);
