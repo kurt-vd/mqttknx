@@ -560,15 +560,15 @@ static void my_eib_repeat_dim(void *dat)
 		libt_add_timeout(0.5, my_eib_repeat_dim, it);
 }
 
-static void my_mqtt_repeat_dim(void *dat)
+/* dim one step */
+static void my_mqtt_dim(struct item *it, int eibdimval)
 {
-	struct item *it = dat;
 	int ret;
 	char buf[32];
 
-	if (it->eibdimval) {
-		int dir = ((it->eibdimval >> 3) & 1) ? 1 : -1; /* turn 0/1 into -1/+1 */
-		int stp = (it->eibdimval >> 0) & 7;
+	if (eibdimval) {
+		int dir = ((eibdimval >> 3) & 1) ? 1 : -1; /* turn 0/1 into -1/+1 */
+		int stp = (eibdimval >> 0) & 7;
 
 		sprintf(buf, "%+.3f", eib_dimsteps[stp]*dir);
 	} else {
@@ -581,9 +581,15 @@ static void my_mqtt_repeat_dim(void *dat)
 	ret = mosquitto_publish(mosq, NULL, it->dimtopic, strlen(buf), buf, mqtt_qos, 0);
 	if (ret)
 		mylog(LOG_ERR, "mosquitto_publish %s '%s': %s", it->dimtopic, buf, mosquitto_strerror(ret));
+}
 
-	if (it->eibdimval)
-		libt_add_timeout(0.5, my_mqtt_repeat_dim, it);
+/* locally repeat dimmer until 0 */
+static void my_mqtt_repeat_dim(void *dat)
+{
+	struct item *it = dat;
+
+	my_mqtt_dim(it, it->eibdimval);
+	libt_add_timeout(0.5, my_mqtt_repeat_dim, it);
 }
 
 static int test_suffix(const char *topic, const char *suffix)
@@ -857,14 +863,17 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 			if (mqtt_owned(it) && it->dimaddr && dst == it->dimaddr) {
 				int dimval = evalue & 0xf;
 
-				if (dimval != it->eibdimval || !dimval) {
-					/* only propagate when changed
-					 * so subsequent dim commands with equal value
-					 * are silenced in favor of our own dim repeater
-					 * allow to repeat when turning off.
+				if ((dimval & 0x7) == 1) {
+					/* dim in steps of 1%, use local repeat dimming
+					 * in 8 steps
 					 */
-					it->eibdimval = dimval;
+					it->eibdimval = (dimval & 0x8) | 0x4;
 					libt_add_timeout(0, my_mqtt_repeat_dim, it);
+
+				} else {
+					/* propagate directly, with no repeater */
+					libt_remove_timeout(my_mqtt_repeat_dim, it);
+					my_mqtt_dim(it, dimval);
 				}
 			}
 			for (naddr = 0; naddr < it->naddr; ++naddr) {
