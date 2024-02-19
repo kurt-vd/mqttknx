@@ -184,6 +184,7 @@ struct item {
 	int saddr;
 	eibaddr_t dimaddr;
 	int eibdimval; /* current pending dimming value, used in both directions */
+	int eibdimcnt; /* count repeated dimmer commands, stop after 15sec or so */
 	char *options;
 	char *topic;
 	int topiclen;
@@ -555,9 +556,14 @@ static void my_eib_repeat_dim(void *dat)
 	struct item *it = dat;
 
 	libt_add_timeouta(next_eib_timeslot(), my_eib_send_dim, it);
-	if (it->eibdimval)
+	if (it->eibdimval) {
+		if (it->eibdimcnt++ > 30) {
+			mylog(LOG_NOTICE, "eib repeat dim: stop after %i iterations", it->eibdimcnt);
+			return;
+		}
 		/* schedule repeat when dimval != 0 */
 		libt_add_timeout(0.5, my_eib_repeat_dim, it);
+	}
 }
 
 /* dim one step */
@@ -589,6 +595,10 @@ static void my_mqtt_repeat_dim(void *dat)
 	struct item *it = dat;
 
 	my_mqtt_dim(it, it->eibdimval);
+	if (it->eibdimcnt++ > 30) {
+		mylog(LOG_NOTICE, "eib repeat dim: stop after %i iterations", it->eibdimcnt);
+		return;
+	}
 	libt_add_timeout(0.5, my_mqtt_repeat_dim, it);
 }
 
@@ -781,6 +791,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 				eibval |= 0x8;
 			/* remember dimming value */
 			it->eibdimval = eibval;
+			it->eibdimcnt = 0;
 			libt_add_timeout(0, my_eib_repeat_dim, it);
 		}
 
@@ -868,6 +879,7 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 					 * in 8 steps
 					 */
 					it->eibdimval = (dimval & 0x8) | 0x4;
+					it->eibdimcnt = 0;
 					libt_add_timeout(0, my_mqtt_repeat_dim, it);
 
 				} else {
