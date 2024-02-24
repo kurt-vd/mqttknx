@@ -228,6 +228,8 @@ static void recvd_eib_grp(int fd, void *dat);
 static void my_eib_send_dim(void *dat);
 static void my_eib_repeat_dim(void *dat);
 static void my_mqtt_repeat_dim(void *dat);
+static void mqtt_sub(const char *sub, int opts);
+static void mqtt_unsub(const char *sub, int opts);
 
 static inline int mqtttoeib(double value, struct item *it)
 {
@@ -659,11 +661,17 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		int j;
 
 		it = topictoitem(msg->topic, eib_suffix, msg->payloadlen);
-		if (it && it->naddr) {
+		if (it) {
 			for (j = 0; j < it->naddr; ++j)
 				unregister_local_grp(it->paddr[j]);
-			if (mqtt_owned(it) && it->dimaddr)
-				unregister_local_grp(it->dimaddr);
+			if (it->dimaddr) {
+				if (mqtt_owned(it)) {
+					unregister_local_grp(it->dimaddr);
+				} else {
+					mqtt_unsub(it->dimtopic, 0);
+				}
+			}
+			mqtt_sub((eib_owned(it) && it->writetopic) ? it->writetopic : it->topic, 0);
 		}
 		if (!it || !msg->payloadlen) {
 			if (it)
@@ -672,6 +680,7 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		}
 		/* parse eibaddr */
 		it->naddr = 0;
+		it->dimaddr = 0;
 		for (str = strtok(msg->payload, " \t"); str && *str;) {
 			addr = strtoeibgaddr(str, &endp);
 			if (endp > str)
@@ -727,8 +736,22 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 		} else for (j = 0; j < it->naddr; ++j) {
 			register_local_grp(it->paddr[j]);
 		}
-		if (mqtt_owned(it) && it->dimaddr)
-			register_local_grp(it->dimaddr);
+		mqtt_sub((eib_owned(it) && it->writetopic) ? it->writetopic : it->topic, 0);
+
+		/* relative DIM */
+		if (it->dimaddr) {
+			if (!it->dimtopic)
+				asprintf(&it->dimtopic, "%s/dim", it->topic);
+			if (mqtt_owned(it)) {
+				register_local_grp(it->dimaddr);
+			} else {
+				mqtt_sub(it->dimtopic, 0);
+			}
+		} else {
+			if (it->dimtopic)
+				free(it->dimtopic);
+			it->dimtopic = NULL;
+		}
 
 		/* refresh cache */
 		if (it->naddr && eib_owned(it) && item_option(it, 'w'))
@@ -1122,6 +1145,16 @@ static void mqtt_sub(const char *sub, int opts)
 	ret = mosquitto_subscribe(mosq, NULL, sub, mqtt_qos);
 	if (ret)
 		mylog(LOG_ERR, "mosquitto_subscribe %s: %s", sub, mosquitto_strerror(ret));
+}
+
+__attribute__((unused))
+static void mqtt_unsub(const char *sub, int opts)
+{
+	int ret;
+
+	ret = mosquitto_unsubscribe(mosq, NULL, sub);
+	if (ret)
+		mylog(LOG_ERR, "mosquitto_unsubscribe %s: %s", sub, mosquitto_strerror(ret));
 }
 
 int main(int argc, char *argv[])
