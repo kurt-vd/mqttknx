@@ -62,6 +62,11 @@ static const char help_msg[] =
 	"			32|4B	4byte payloads\n"
 	"			x	1st eib addr is the set request, 2nd is the \n"
 	" -t, --delay=TIME	delay between sent packets (default 0.1s)\n"
+	"MQTT topics\n"
+	" cfg/"NAME"/\n"
+	"	loglevel	(0..7) modify loglevel\n"
+	"	delay		SEC, set delay between EIB packets\n"
+	"	repeat		NUMBER, number of repeats of MQTT-owned items\n"
 	;
 
 #ifdef _GNU_SOURCE
