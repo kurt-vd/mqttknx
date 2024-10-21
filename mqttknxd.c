@@ -863,6 +863,14 @@ static int eib_value(uint16_t hdr, const void *vdat, int len)
 		value = (value << 8) + *dat;
 	return value;
 }
+static const char *eib_str_value(const void *vdat, int len)
+{
+	static char buf[256];
+
+	memcpy(buf, vdat, len);
+	buf[len] = 0;
+	return buf;
+}
 
 static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t hdr,
 		const void *vdat, int len)
@@ -873,6 +881,7 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 	struct event *ev;
 	char *dsttopic;
 	static char sbuf[128];
+	const char *svalue;
 
 	cmd = hdr & 0x03c0;
 	switch (cmd) {
@@ -893,7 +902,13 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 	case 0x0040:
 	case 0x0080:
 		evalue = eib_value(hdr, dat, len);
-		mylog(LOG_INFO, "eib:<%s %s %i", eibactions[cmd >> 6] ?: "?", eibgaddrtostr(dst), evalue);
+		if (len > 4) {
+			svalue = eib_str_value(dat, len);
+			mylog(LOG_INFO, "eib:<%s %s '%s'", eibactions[cmd >> 6] ?: "?", eibgaddrtostr(dst), svalue);
+		} else {
+			mylog(LOG_INFO, "eib:<%s %s %i", eibactions[cmd >> 6] ?: "?", eibgaddrtostr(dst), evalue);
+			svalue = "";
+		}
 		for (it = items; it; it = it->next) {
 			if (it->naddr && it->paddr[0] == dst)
 				/* remove pending request for this item */
@@ -943,7 +958,7 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 				if (item_option(it, 'w')) {
 					double devalue = eibtomqtt(evalue, it);
 					/* forward volatile or new or changed entries */
-					const char *vstr = mydtostr(devalue);
+					const char *vstr = (len <= 4) ? mydtostr(devalue) : svalue;
 					/* push in MQTT, retain if not volatile */
 					dsttopic = (mqtt_owned(it) && it->writetopic) ? it->writetopic : it->topic;
 					mylog(LOG_INFO, "mqtt:>%s %s", dsttopic, vstr);
