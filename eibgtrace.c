@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include <unistd.h>
+#include <endian.h>
 #include <getopt.h>
 #include <syslog.h>
 #include <eibclient.h>
@@ -14,6 +15,8 @@
 #ifndef VERSION
 #define VERSION "<undefined version>"
 #endif
+
+#define USE_GRP 0
 
 /* generic error logging */
 #define mylog(loglevel, fmt, ...) \
@@ -31,27 +34,19 @@ static const char help_msg[] =
 	"\n"
 	"Options\n"
 	" -V, --version		Show version\n"
-	" -s, --syslog		Log to syslog\n"
 	;
 
 #ifdef _GNU_SOURCE
 static struct option long_opts[] = {
 	{ "help", no_argument, NULL, '?', },
 	{ "version", no_argument, NULL, 'V', },
-	{ "syslog", no_argument, NULL, 's', },
 	{ },
 };
 #else
 #define getopt_long(argc, argv, optstring, longopts, longindex) \
 	getopt((argc), (argv), (optstring))
 #endif
-static const char optstring[] = "V?s";
-
-struct item {
-	struct item *next;
-	eibaddr_t group;
-	int delay;
-};
+static const char optstring[] = "V?";
 
 /* EIB parameters */
 static const char *eib_uri = "ip:localhost";
@@ -94,6 +89,25 @@ const char *nowstr(void)
 	return buf;
 }
 
+uint16_t getbe16(const void *dat)
+{
+	uint16_t val;
+
+	memcpy(&val, dat, 2);
+	return be16toh(val);
+
+}
+
+int eib_checksum(const void *vdat, int size)
+{
+	const uint8_t *dat = vdat;
+	uint8_t sum = 0;
+
+	for (; size; --size, ++dat)
+		sum ^= *dat;
+	return ~sum;
+}
+
 int main(int argc, char *argv[])
 {
 	int opt, ret, j;
@@ -102,6 +116,8 @@ int main(int argc, char *argv[])
 	uint32_t value;
 	eibaddr_t src, dst;
 	uint8_t buf[32];
+	uint8_t *pkt;
+	int pktlen;
 
 	/* argument parsing */
 	while ((opt = getopt_long(argc, argv, optstring, long_opts, NULL)) >= 0)
@@ -134,43 +150,98 @@ int main(int argc, char *argv[])
 	eib = EIBSocketURL(eib_uri);
 	if (!eib)
 		mylog(LOG_ERR, "eib socket failed");
+#if USE_GRP
 	ret = EIBOpen_GroupSocket(eib, 0);
+#else
+	ret = EIBOpenVBusmonitor(eib);
+#endif
 	if (ret < 0)
-		mylog(LOG_ERR, "EIB: open groupsocket failed");
+		mylog(LOG_ERR, "EIB: open socket failed");
 
 	/* grab values */
 	/* run */
-	while (1) {
-		ret = EIBGetGroup_Src(eib, sizeof (buf), buf, &src, &dst);
+	for (;;) {
+		pkt = buf;
+#if USE_GRP
+		pktlen = ret = EIBGetGroup_Src(eib, sizeof(buf), buf, &src, &dst);
+#else
+		pktlen = ret = EIBGetBusmonitorPacket(eib, sizeof(buf), buf);
+#endif
 		if (ret < 0)
 			mylog(LOG_ERR, "EIB: Get packet failed");
-		if (ret < 2)
-			/* too short, just ignore */
-			continue;
-		pkthdr = (buf[0] << 8) + buf[1];
-		cmd = (pkthdr >> 6) & 0xf;
+		printf("%s ", nowstr());
+		for (j = 0; j < pktlen; ++j) {
 #if 0
-		if (((pkthdr & 0x03c0) != 0x0040) && (pkthdr & 0x03c0) != 0x0080)
-			/* only process response & write */
-			continue;
+			if (!(j % 4))
+				printf(" ");
 #endif
-		/* write */
-		value = pkthdr & 0x3f;
-		if (ret > 2) {
-			ret -= 2;
-			if (ret > 4)
-				/* limit to 4 bytes */
-				ret = 4;
-			value = 0;
-			for (j = 0; j < ret; ++j)
-				value = (value << 8) + buf[2+j];
+			printf("%02x", pkt[j]);
 		}
-		static const char *cmdstrs[16] = {
-			[0] = "r,",
-			[1] = "w,",
-			//[2] = "t,",
-		};
-		printf("%s %s %s %s%u\n", nowstr(), eibphysstr(src), eibgroupstr(dst), cmdstrs[cmd] ?: "", value);
+
+#if USE_GRP
+		if (pktlen >= 2) {
+#else
+		if (!(pkt[0] & 0x33)) {
+			if (pkt[0] & 0xc0)
+			printf(" %s", (pkt[0] & 0xc0) ? "ack" : "nack");
+			if (!(pkt[0] & 0x0c))
+				printf(",busy");
+
+		} else if ((pkt[0] & 0x10) && pktlen >= 8 +1) {
+			/* data frame */
+			src = getbe16(pkt+1);
+			dst = getbe16(pkt+3);
+			pktlen -= 7;
+			pkt += 6;
+#endif
+			pkthdr = getbe16(pkt);
+			cmd = (pkthdr >> 6) & 0xf;
+#if 0
+			if (((pkthdr & 0x03c0) != 0x0040) && (pkthdr & 0x03c0) != 0x0080)
+				/* only process response & write */
+				continue;
+#endif
+			/* write */
+			value = pkthdr & 0x3f;
+			if (pktlen > 2) {
+				int vallen = pktlen - 2;
+				if (vallen > 4)
+					/* limit to 4 bytes */
+					vallen = 4;
+				value = 0;
+				for (j = 0; j < vallen; ++j)
+					value = (value << 8) + pkt[2+j];
+			}
+			printf(" %s %s %u", eibphysstr(src), eibgroupstr(dst), value);
+#if ! USE_GRP
+			pkt -= 6;
+			pktlen -= 6;
+
+			static const char *cmdstrs[16] = {
+				[0] = "rd",
+				[1] = "wr",
+				[2] = "tx",
+			};
+
+			static const char *priostr[4] = {
+				[0] = "sys",
+				[1] = "hi",
+				[2] = "norm",
+				[3] = "low",
+			};
+
+			printf(" (");
+			printf("pri:%s", priostr[(pkt[0] >> 2) & 0x3]);
+			if (cmdstrs[cmd])
+				printf(",%s", cmdstrs[cmd]);
+			if (!((pkt[0] & 0x60) == 0x20))
+				printf(",%s", "repeat");
+			if (pktlen > 1 && eib_checksum(pkt, pktlen-1) != pkt[pktlen-1])
+				printf(",%s", "crcnok");
+			printf(")");
+#endif
+		}
+		printf("\n");
 		fflush(stdout);
 	}
 
