@@ -182,7 +182,6 @@ int main(int argc, char *argv[])
 		if (pktlen >= 2) {
 #else
 		if (!(pkt[0] & 0x33)) {
-			if (pkt[0] & 0xc0)
 			printf(" %s", (pkt[0] & 0xc0) ? "ack" : "nack");
 			if (!(pkt[0] & 0x0c))
 				printf(",busy");
