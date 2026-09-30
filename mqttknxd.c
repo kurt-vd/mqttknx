@@ -203,7 +203,8 @@ struct event {
 	struct event *prev;
 
 	char *topic;
-	char *pattern;
+	int npatterns, spatterns;
+	char **patterns;
 };
 static struct event *events;
 
@@ -384,8 +385,11 @@ static void delete_event(struct event *ev)
 	if (ev->next)
 		ev->next->prev = ev->prev;
 	free(ev->topic);
-	if (ev->pattern)
-		free(ev->pattern);
+	int j;
+	for (j = 0; j < ev->npatterns; ++j)
+		free(ev->patterns[j]);
+	if (ev->patterns)
+		free(ev->patterns);
 	free(ev);
 }
 
@@ -774,9 +778,23 @@ static void my_mqtt_msg(struct mosquitto *mosq, void *dat, const struct mosquitt
 				delete_event(ev);
 			return;
 		}
-		if (ev->pattern)
-			free(ev->pattern);
-		ev->pattern = strdup(msg->payload);
+		int j;
+		char *tok;
+		/* clean patterns */
+		for (j = 0; j < ev->npatterns; ++j)
+			free(ev->patterns[j]);
+		ev->npatterns = 0;
+
+		/* re-assign */
+		for (tok = strtok(msg->payload, " \t"); tok; tok = strtok(NULL, " \t")) {
+			if (ev->npatterns >= ev->spatterns) {
+				ev->spatterns = (ev->spatterns*2) ?: 8;
+				ev->patterns = realloc(ev->patterns, sizeof(ev->patterns[0])*ev->spatterns);
+				if (!ev->patterns)
+					mylog(LOG_ERR, "realloc %i patterns: %s", ev->spatterns, ESTR(errno));
+			}
+			ev->patterns[ev->npatterns++] = strdup(tok);
+		}
 
 	} else if (mqtt_write_suffix && test_suffix(msg->topic, mqtt_write_suffix)) {
 		if (msg->retain)
@@ -882,6 +900,7 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 	char *dsttopic;
 	static char sbuf[128];
 	const char *svalue;
+	int j;
 
 	cmd = hdr & 0x03c0;
 	switch (cmd) {
@@ -977,7 +996,12 @@ static void eib_msg(EIBConnection *eib, eibaddr_t src, eibaddr_t dst, uint16_t h
 		/* emit events for matched patterns */
 		sprintf(sbuf, "%s,%s,%i", eibphaddrtostr(src), eibgaddrtostr(dst), evalue);
 		for (ev = events; ev; ev = ev->next) {
-			if (fnmatch(ev->pattern, sbuf, 0))
+			for (j = 0; j < ev->npatterns; ++j) {
+				if (!fnmatch(ev->patterns[j], sbuf, 0))
+					break;
+			}
+			if (j >= ev->npatterns)
+				/* not a match */
 				continue;
 			ret = mosquitto_publish(mosq, NULL, ev->topic, strlen(sbuf), sbuf, mqtt_qos, 0);
 			if (ret)
